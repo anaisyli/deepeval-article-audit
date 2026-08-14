@@ -1,0 +1,4 @@
+interface:
+  display_name: "文章知识库支持率评审"
+  short_description: "按DeepEval Faithfulness规则复现文章知识支持率"
+  default_prompt: "Use $deepeval-article-audit to audit my finished articles against the supplied knowledge files and produce claim details, a one-row-per-article summary, and an interactive evidence-linked HTML report."
