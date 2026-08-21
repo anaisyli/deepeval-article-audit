@@ -8,7 +8,7 @@
 Faithfulness = supported factual claims / total factual claims
 ```
 
-本 Skill 中的 `retrieval_context` 仅指用户明确提供的知识库文件或文章写作输入文件。
+本 Skill 中的 `retrieval_context` 仅指实际交给写作Codex的、由用户明确提供的事实知识文件。对`manage-article-knowledge v0.5`，固定且只能是当前文章任务中的`30_本篇知识库资料.md`；不能追加`35`、Formal Claim、整个项目知识库或原始随文事实文件。随文事实文件应先由知识库流程合并进当前`30/35`。
 
 ## 2. 分母：事实主张总数
 
@@ -50,7 +50,13 @@ Faithfulness = supported factual claims / total factual claims
 
 `unsupported` 主张可以记录最接近但不足以支持的原文；如果完全没有相关原文，`evidence` 使用空数组，并明确写“提供的知识文件中未找到支持证据”。
 
-文章定位字段 `article_quote` 也必须从文章正文逐字复制，并尽量使用包含该原子主张的最短连续片段。不得把改写后的主张文本冒充文章原句。
+对当前`30_本篇知识库资料.md`：
+
+- 只把第1至第3节中明确标题为`证据正文（供Faithfulness核验）`的内容作为正向证据；证据引用的起止行必须完整位于同一个证据正文块内。
+- 直接写作事实、英文表达表、数据展示表本身、按大纲使用、生成控制和缺口处理都不能作为证据；表格事实必须引用其配套证据正文。
+- `30`不显示Formal Claim ID。审核Skill不读取`35`，接收方在导入时按证据引用区间与`35`映射区间的重叠关系确定Formal Claim。
+
+文章定位字段 `article_quote` 也必须从文章正文逐字复制，并尽量使用包含该原子主张的最短连续片段。不得把改写后的主张文本冒充文章原句。这里的“逐字”指原始Markdown文件中的连续子串；若引用范围包含`**`、反引号、链接语法或引用符号，必须原样保留这些字符。知识证据`quote`遵循同一规则。
 
 ## 5. 判断 JSON 格式
 
@@ -92,6 +98,8 @@ Faithfulness = supported factual claims / total factual claims
 - `verdict` 只能是 `supported` 或 `unsupported`。
 - `supported` 的 `evidence` 不得为空。
 - 证据 `quote` 必须逐字存在于标注的知识文件行号范围内。
+- prepared与judgments的`schema_version`当前固定为`1.0`。
+- v0.5终稿中的`文章ID`优先于通用文件名；显式传入的ID不得与元数据冲突。
 
 ## 6. 报告字段
 
@@ -100,3 +108,19 @@ Faithfulness = supported factual claims / total factual claims
 整体统计表固定为一篇文章一行，包含：文章编号、文章标题、支持主张数（分子）、全部事实主张数（分母）、不支持主张数、Faithfulness 百分比、评审模式。
 
 百分比保留两位小数。分母为零时显示 `N/A`，不得显示 0% 或 100%。
+
+人类可读报告同时提供一层内容单元诊断，但不改变上述 claim-level 计算：以 prepared JSON 的每个 `articleUnit` 为一个内容单元；有一条或多条原子主张的单元标为“事实”，没有主张的单元标为“非事实，不计入”。事实单元再按其下主张标为“全部支持”“部分支持”或“完全不支持”。“事实内容占比”=事实单元数÷全部内容单元数，仅用于解释正文中哪些内容进入事实审核，不等于 Faithfulness，也不等于原文引用率。表格字段仍可在原子主张层逐项核验，表格所在内容单元同时显示聚合状态。
+
+HTML 应展示完整文章内容，并直接按 prepared JSON 的最小内容单元逐条渲染：句子、列表项或表格数据行各自成为独立卡片；同一原始Markdown行中的多个单元不得重新合并。每个卡片显示原始行号、`unit_id`、事实/非事实状态、支持聚合状态和原子主张数量。非事实单元灰显，事实单元按支持状态着色，并提供“全部/事实/全部支持/不支持/非事实”筛选。Markdown 汇总保留原有导入主表列顺序，在其后追加内容单元诊断表；不得替换或重排 `manage-article-knowledge v0.5` 校验的主表。
+
+汇总表单元格不得包含会被导入器误拆列的原始英文竖线`|`；渲染器会把正文中的竖线转成HTML实体。交接时保留原始`faithfulness_summary.md`，不要手工重排表格。
+
+## 7. manage-article-knowledge v0.5交接
+
+v0.5导入必需文件是：
+
+1. `<article-id>-prepared.json`；
+2. `<article-id>-judgments.json`；
+3. `faithfulness_summary.md`。
+
+导入时还需要当前`40_最终文章.md`、实际审核过的全部知识文件、文章版本和完成日期。知识文件参数顺序必须与prepared中的`knowledge_files`一致。终稿或任一知识文件改变后，旧结果失效，应重新审核而不是修改旧JSON。
