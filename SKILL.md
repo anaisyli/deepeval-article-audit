@@ -1,9 +1,9 @@
 ---
 name: deepeval-article-audit
-description: Audit finished articles against the exact local fact inputs supplied to the writer by reproducing DeepEval Faithfulness claim extraction, evidence judgment, and supported-claims/total-claims calculation with the current Codex model, without an evaluator API. Use for article support-rate review, unsupported-claim review, claim-to-source mapping, import-ready manage-article-knowledge v0.5 artifacts, Markdown details, batch summaries, or highlighted HTML. Always label results as a Codex reproduction, not an official DeepEval run.
+description: Audit finished articles against the exact local fact inputs supplied to the writer by reproducing DeepEval Faithfulness claim extraction, evidence judgment, and supported-claims/total-claims calculation with the current Codex model, without an evaluator API. Use for article support-rate review, unsupported-claim review, claim-to-source mapping, import-ready manage-article-knowledge v0.6 or v0.5 artifacts, Markdown details, batch summaries, or highlighted HTML. Always label results as a Codex reproduction, not an official DeepEval run.
 ---
 
-# DeepEval-style Article Audit v1.1
+# DeepEval-style Article Audit v1.2
 
 Evaluate finished article bodies against only the knowledge files supplied by the user. Use the current Codex model as the judge and require no evaluator API key.
 
@@ -29,6 +29,18 @@ For a `manage-article-knowledge v0.5` task folder, pair exactly:
 
 In `manage-article-knowledge v0.5` mode, accept exactly one factual input: the current `30_本篇知识库资料.md`. Article-specific source files must first be consolidated through that Skill into source records, Formal Claims and the current `30/35`; do not add them as parallel knowledge files. Generic non-manage audits may still accept multiple explicitly supplied knowledge files.
 
+For a `manage-article-knowledge v0.6` controlled run, read [the v0.6 managed-audit adapter](references/manage-article-knowledge-v06-integration.md), locate the installed knowledge-base Skill, and read its canonical `references/handoff-contract.json`. Accept the controlled request fields:
+
+```text
+handoff_event: faithfulness_request
+handoff_contract_version, article_file, knowledge_file, project_id,
+article_id, article_version, result_root, result_dir
+```
+
+The project-specific paths are owned by the knowledge-base Skill's integration configuration. Do not search for or invent them here. `result_dir` is the single version-specific directory for this article; all three importable core artifacts must be written there.
+
+When this Skill is invoked as the post-writing step described by the v0.6 handoff, do not wait for a second human instruction. Reject a missing or incompatible `handoff_contract_version`; do not guess or fall back to another local contract. Once the controlled request and current `40`/`30` pair pass the canonical contract, run the audit, write the three core results to `result_dir`, and return `handoff_event: faithfulness_completed` with the same contract version. This event only means that Faithfulness artifacts were generated and validated; it is not the end of the article workflow. The knowledge-base Skill must continue with `import_faithfulness.py`, governance updates and migration to `40_已完成`, then issue its own `article_completed` event. Human-facing reporting is only needed for a validation failure or a business decision outside Faithfulness.
+
 Confirm the file pairing from filenames and content. If more than one plausible article or knowledge file remains and the pairing would change the result, ask one concise question before judging.
 
 Treat only user-supplied knowledge files as `retrieval_context`. Do not use web search, model memory, unrelated project files, or the finished article itself as evidence.
@@ -37,16 +49,32 @@ Treat only user-supplied knowledge files as `retrieval_context`. Do not use web 
 
 1. Read `references/method.md` completely.
 2. Create a work output directory that does not overwrite source files.
-3. For each article, run:
+3. For each article, run one of the following paths:
+
+   In v0.6 controlled mode, use the version-specific result directory supplied by the knowledge-base Skill:
+
+   `python scripts/prepare_article_audit.py --article <40_最终文章.md> --knowledge <30_本篇知识库资料.md> --project-id <project-id> --article-id <article-id> --article-version <article-version> --handoff-contract-version <contract-version> --result-dir <result-dir>`
+
+   After judgments are written as `<article-id>-judgments.json` in that same directory, render it with:
+
+   `python scripts/render_article_audit.py --result-dir <result-dir> --article-id <article-id> --article-version <article-version>`
+
+   If the knowledge-base Skill has already moved the task from `30_等待Faithfulness` to `40_已完成`, revalidate the same artifacts without rewriting them by supplying the moved current files and a separate report directory:
+
+   `python scripts/render_article_audit.py --result-dir <result-dir> --article <moved-40_最终文章.md> --knowledge <moved-30_本篇知识库资料.md> --output-dir <review-output-dir>`
+
+   The managed commands reject identity mismatches, extra factual inputs, missing version metadata, malformed `[result root]/[article-id]/v[version]/` directories, and attempts to overwrite an existing core result.
+
+   For generic or legacy use, run:
 
    `python scripts/prepare_article_audit.py --article <article.md> --knowledge <knowledge1.md> [--knowledge <knowledge2.md> ...] --output <article-id>-prepared.json`
 
    If `python` is unavailable, locate and use the Python runtime provided by the current Codex workspace.
 
-   The preparer reads `文章ID` or `Article ID` metadata before falling back to the filename. If `--article-id` conflicts with file metadata, stop and correct the pairing.
+   The preparer reads `文章ID` or `Article ID` metadata before falling back to the filename. In v0.6 it also requires and validates `文章版本`. If `--article-id` conflicts with file metadata, stop and correct the pairing.
 
-4. Review every `articleUnit` in the prepared JSON in article order. Extract every atomic, independently checkable factual claim. Do not sample.
-5. Judge each claim against the candidate evidence. Search the supplied knowledge files directly when the candidates are insufficient. In a current v0.5 writing-material file, only content under a `证据正文（供Faithfulness核验）` heading in sections 1-3 is positive evidence. Direct writing facts, English-expression tables, data display tables without an evidence body, outline guidance, controls and gap-handling sections are not citable evidence.
+4. Review every `articleUnit` in the prepared JSON in article order. Extract every atomic, independently checkable factual claim. Do not sample. Each atomic claim must be a direct extraction or minimal normalization of its own `article_quote`; never attach a claim from another sentence or FAQ unit. If a faithful normalization has no shared wording with the quote, add a concrete `derivation_note` explaining the exact transformation so the validator can distinguish it from a swapped claim.
+5. Judge each claim against the candidate evidence. Search the supplied knowledge files directly when the candidates are insufficient. In a current manage-article writing-material file (v0.5/v0.6), only content under a `证据正文（供Faithfulness核验）` heading in sections 1-3 is positive evidence. Direct writing facts, English-expression tables, data display tables without an evidence body, outline guidance, controls and gap-handling sections are not citable evidence.
 6. Write `<article-id>-judgments.json` using the schema in `references/method.md`. Copy article and knowledge quotations as exact raw substrings, including Markdown markers when they occur inside the quoted span, and preserve line numbers.
 7. Run the renderer once for the whole batch:
 
@@ -71,7 +99,7 @@ Produce all of the following:
 - Count a supported paraphrase as supported; verbatim overlap is not required.
 - Mark a real-world fact unsupported when the supplied knowledge context does not support it.
 - Require at least one exact knowledge quotation for every supported claim.
-- For current `30_本篇知识库资料.md`, cite only a complete line range inside an explicit evidence body in sections 1-3. Do not cite metadata, direct writing facts, English-expression tables, outline guidance, controls or gap-handling text.
+- For current `30_本篇知识库资料.md` in v0.5/v0.6, cite only a complete line range inside an explicit evidence body in sections 1-3. Do not cite metadata, direct writing facts, English-expression tables, outline guidance, controls or gap-handling text.
 - Do not search for or cite Formal Claim IDs in `30`. The receiving Skill maps evidence-body line ranges through sibling `35_写作素材来源索引.md`, which is not part of retrieval context.
 - Do not use partial credit. Split the claim, then use only `supported` or `unsupported`.
 - Compute the score only as `supported claims / all factual claims`. Exclude non-factual language before creating claim rows.
@@ -85,13 +113,13 @@ Produce all of the following:
 
 Tell the user which files were treated as articles and knowledge context, how many claims were counted, the resulting score, and where the three human-readable outputs were saved.
 
-For `manage-article-knowledge v0.5`, hand off these files without editing them:
+For `manage-article-knowledge v0.6` or v0.5, hand off these files without editing them:
 
 - `<article-id>-prepared.json`;
 - `<article-id>-judgments.json`;
 - `faithfulness_summary.md`.
 
-Also report the article file and every knowledge file in the exact order stored in `prepared.json`. The v0.5 importer must receive repeated `--knowledge` arguments in that same order. Detailed Markdown and HTML remain audit outputs and are not required for import. Do not write directly to the knowledge project's Faithfulness CSV files; the receiving Skill owns the import.
+In v0.6, keep all three core files in the supplied `result_dir`; the receiving Skill reads that directory and performs the import. Also report the article file and every knowledge file in the exact order stored in `prepared.json`. The importer must receive repeated `--knowledge` arguments in that same order. Detailed Markdown and HTML remain audit outputs and are not required for import. Do not write directly to the knowledge project's Faithfulness CSV files; the receiving Skill owns the import.
 
 ## Maintenance
 

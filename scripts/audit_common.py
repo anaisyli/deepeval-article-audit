@@ -94,18 +94,38 @@ def split_units(text: str) -> list[str]:
 def extract_article(path: Path) -> dict[str, Any]:
     lines = read_text(path).splitlines()
     title = path.stem
+    metadata_title = parse_field(lines, "文章标题") or parse_field(lines, "最终标题")
+    if metadata_title:
+        title = metadata_title
     start = 0
+    body_heading = ""
     for index, raw in enumerate(lines):
         heading = markdown_heading(raw)
-        if heading and heading[0] == 1 and title == path.stem:
+        if heading and heading[0] == 1 and not metadata_title and title == path.stem:
             title = heading[1]
-        if heading and "最终正文" in heading[1]:
+        if heading and heading[1] in {"最终正文", "正文"}:
             start = index + 1
+            body_heading = heading[1]
             break
+
+    # Older v0.5/v0.6 articles may omit the explicit body heading. Once article
+    # metadata is present, skip it and the title heading instead of auditing the
+    # administrative fields as article content.
+    if not body_heading and metadata_title:
+        metadata_end = -1
+        for index, raw in enumerate(lines):
+            if re.match(r"^\s*[-*]\s*(?:文章ID|文章版本|文章标题|最终标题|完成日期|模板版本)[：:]", raw, re.I):
+                metadata_end = index
+        for index in range(metadata_end + 1, len(lines)):
+            heading = markdown_heading(lines[index])
+            if heading and heading[0] == 1:
+                start = index + 1
+                body_heading = heading[1]
+                break
 
     article_lines: list[dict[str, Any]] = []
     units: list[dict[str, Any]] = []
-    body_title_found = False
+    body_title_found = bool(metadata_title)
     for index in range(start, len(lines)):
         raw = lines[index]
         heading = markdown_heading(raw)
@@ -130,8 +150,10 @@ def extract_article(path: Path) -> dict[str, Any]:
     return {
         "title": title,
         "metadata_article_id": metadata_article_id(lines),
+        "metadata_article_version": parse_field(lines, "文章版本"),
         "article_lines": article_lines,
         "article_units": units,
+        "body_heading": body_heading,
     }
 
 

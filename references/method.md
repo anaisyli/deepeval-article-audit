@@ -8,7 +8,7 @@
 Faithfulness = supported factual claims / total factual claims
 ```
 
-本 Skill 中的 `retrieval_context` 仅指实际交给写作Codex的、由用户明确提供的事实知识文件。对`manage-article-knowledge v0.5`，固定且只能是当前文章任务中的`30_本篇知识库资料.md`；不能追加`35`、Formal Claim、整个项目知识库或原始随文事实文件。随文事实文件应先由知识库流程合并进当前`30/35`。
+本 Skill 中的 `retrieval_context` 仅指实际交给写作Codex的、由用户明确提供的事实知识文件。对`manage-article-knowledge v0.5/v0.6`，固定且只能是当前文章任务中的`30_本篇知识库资料.md`；不能追加`35`、Formal Claim、整个项目知识库或原始随文事实文件。随文事实文件应先由知识库流程合并进当前`30/35`。
 
 ## 2. 分母：事实主张总数
 
@@ -95,6 +95,7 @@ Faithfulness = supported factual claims / total factual claims
 - `unit_id` 必须对应 prepared JSON 中的文章单元。
 - `article_line` 必须等于该单元的原始行号。
 - `article_quote` 必须是该文章单元的连续原文子串。
+- `claim`必须直接来自同一`article_quote`，只允许为原子化而做最小规范化；不得把其他正文句或FAQ单元的主张挂到当前引文。若忠实规范化后与引文没有共享词语，必须增加`derivation_note`，具体说明引文到原子主张的转换；空泛说明不能替代对应关系。
 - `verdict` 只能是 `supported` 或 `unsupported`。
 - `supported` 的 `evidence` 不得为空。
 - 证据 `quote` 必须逐字存在于标注的知识文件行号范围内。
@@ -115,12 +116,12 @@ HTML 应展示完整文章内容，并直接按 prepared JSON 的最小内容单
 
 汇总表单元格不得包含会被导入器误拆列的原始英文竖线`|`；渲染器会把正文中的竖线转成HTML实体。交接时保留原始`faithfulness_summary.md`，不要手工重排表格。
 
-## 7. manage-article-knowledge v0.5交接
+## 7. manage-article-knowledge v0.5/v0.6交接
 
-v0.5导入必需文件是：
+v0.5/v0.6导入必需文件是：
 
 1. `<article-id>-prepared.json`；
 2. `<article-id>-judgments.json`；
 3. `faithfulness_summary.md`。
 
-导入时还需要当前`40_最终文章.md`、实际审核过的全部知识文件、文章版本和完成日期。知识文件参数顺序必须与prepared中的`knowledge_files`一致。终稿或任一知识文件改变后，旧结果失效，应重新审核而不是修改旧JSON。
+v0.6受管运行时，三个文件必须位于知识库配置计算出的`[结果根目录]/[文章ID]/v[文章版本]/`，且目录名不能重复版本前缀；由知识库Skill传入当前`40`、唯一`30`、文章ID和文章版本。导入时还需要当前`40_最终文章.md`、实际审核过的全部知识文件、文章版本和完成日期。知识文件参数顺序必须与prepared中的`knowledge_files`一致。终稿或任一知识文件改变后，旧结果失效，应重新审核而不是修改旧JSON。文章目录移动后如需复核，使用当前`40/30`覆盖路径并输出到新报告目录，不改写原审计文件。

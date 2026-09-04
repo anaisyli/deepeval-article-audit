@@ -14,13 +14,19 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+from manage_handoff_contract import load_contract  # noqa: E402
 from render_article_audit import MODE, discover_cases  # noqa: E402
+
+
+_, _HANDOFF_CONTRACT = load_contract()
+HANDOFF_VERSION = str(_HANDOFF_CONTRACT["handoff_contract_version"])
 
 
 ARTICLE_TEXT = """# 最终文章
 
 - 文章ID：ART-V05-001
 - 文章版本：v1
+- 文章标题：Product Guide
 - 完成日期：2026-08-19
 
 ## 最终正文
@@ -99,6 +105,7 @@ class AuditPipelineTests(unittest.TestCase):
         self.knowledge = self.root / "30_本篇知识库资料.md"
         self.work = self.root / "work"
         self.output = self.root / "output"
+        self.managed = self.root / "managed-result" / "TEST-PROJECT" / "ART-V05-001" / "v1"
         self.article.write_text(ARTICLE_TEXT, encoding="utf-8")
         self.knowledge.write_text(KNOWLEDGE_TEXT, encoding="utf-8")
         checksum = hashlib.sha256(self.knowledge.read_bytes()).hexdigest()
@@ -158,6 +165,34 @@ class AuditPipelineTests(unittest.TestCase):
             text=True,
         )
         return json.loads(self.prepared.read_text(encoding="utf-8"))
+
+    def run_prepare_managed(self) -> dict:
+        subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPTS / "prepare_article_audit.py"),
+                "--article",
+                str(self.article),
+                "--knowledge",
+                str(self.knowledge),
+                "--article-id",
+                "ART-V05-001",
+                "--article-version",
+                "v1",
+                "--project-id",
+                "TEST-PROJECT",
+                "--handoff-contract-version",
+                HANDOFF_VERSION,
+                "--result-dir",
+                str(self.managed),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        return json.loads(
+            (self.managed / "ART-V05-001-prepared.json").read_text(encoding="utf-8")
+        )
 
     def valid_judgments(self, prepared: dict) -> dict:
         units = {item["text"]: item for item in prepared["article_units"]}
@@ -252,7 +287,7 @@ class AuditPipelineTests(unittest.TestCase):
         )
         summary = (self.output / "faithfulness_summary.md").read_text(encoding="utf-8")
         self.assertIn("2 | 3 | 1 | 66.67%", summary)
-        self.assertIn("Product &#124; Guide", summary)
+        self.assertIn("Product Guide", summary)
         self.assertIn("内容单元诊断（不改变上方主指标）", summary)
         self.assertIn("事实内容占比", summary)
         detail = (self.output / "ART-V05-001_faithfulness_details.md").read_text(encoding="utf-8")
@@ -264,6 +299,106 @@ class AuditPipelineTests(unittest.TestCase):
         self.assertIn("class=\"article-line article-unit fully-supported\"", highlight)
         self.assertIn("class=\"article-line article-unit unsupported\"", highlight)
 
+    def test_v06_managed_run_uses_one_version_directory(self) -> None:
+        prepared = self.run_prepare_managed()
+        self.assertEqual(prepared["integration_mode"], "manage-article-knowledge-v0.6")
+        self.assertEqual(prepared["project_id"], "TEST-PROJECT")
+        self.assertEqual(prepared["handoff_contract_version"], HANDOFF_VERSION)
+        self.assertEqual(prepared["article_version"], "v1")
+        self.assertEqual(len(prepared["knowledge_files"]), 1)
+        managed_judgments = self.managed / "ART-V05-001-judgments.json"
+        managed_judgments.write_text(
+            json.dumps(self.valid_judgments(prepared), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPTS / "render_article_audit.py"),
+                "--result-dir",
+                str(self.managed),
+                "--article-id",
+                "ART-V05-001",
+                "--article-version",
+                "v1",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertTrue((self.managed / "faithfulness_summary.md").is_file())
+        self.assertTrue((self.managed / "faithfulness_highlight.html").is_file())
+
+    def test_v06_managed_run_rejects_version_mismatch(self) -> None:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPTS / "prepare_article_audit.py"),
+                "--article",
+                str(self.article),
+                "--knowledge",
+                str(self.knowledge),
+                "--article-version",
+                "v2",
+                "--project-id",
+                "TEST-PROJECT",
+                "--handoff-contract-version",
+                HANDOFF_VERSION,
+                "--result-dir",
+                str(self.managed),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("conflicts with article metadata version", result.stderr + result.stdout)
+
+    def test_v06_managed_run_rejects_incompatible_handoff_contract(self) -> None:
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPTS / "prepare_article_audit.py"),
+                "--article",
+                str(self.article),
+                "--knowledge",
+                str(self.knowledge),
+                "--article-id",
+                "ART-V05-001",
+                "--article-version",
+                "v1",
+                "--project-id",
+                "TEST-PROJECT",
+                "--handoff-contract-version",
+                "MAK-HANDOFF-99.0",
+                "--result-dir",
+                str(self.managed),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unsupported_contract_version", result.stderr + result.stdout)
+
+    def test_v06_managed_renderer_rejects_existing_summary(self) -> None:
+        prepared = self.run_prepare_managed()
+        (self.managed / "ART-V05-001-judgments.json").write_text(
+            json.dumps(self.valid_judgments(prepared), ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        (self.managed / "faithfulness_summary.md").write_text("existing\n", encoding="utf-8")
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPTS / "render_article_audit.py"),
+                "--result-dir",
+                str(self.managed),
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Refusing to overwrite existing managed summary", result.stderr + result.stdout)
+
     def test_renderer_rejects_normalized_only_article_quote(self) -> None:
         prepared = self.run_prepare()
         judgments = self.valid_judgments(prepared)
@@ -272,6 +407,25 @@ class AuditPipelineTests(unittest.TestCase):
             json.dumps(judgments, ensure_ascii=False, indent=2), encoding="utf-8"
         )
         with self.assertRaisesRegex(ValueError, "exact substring"):
+            discover_cases(self.work)
+
+    def test_legacy_body_heading_excludes_managed_metadata(self) -> None:
+        self.article.write_text(ARTICLE_TEXT.replace("## 最终正文", "## 正文"), encoding="utf-8")
+        prepared = self.run_prepare()
+        texts = [unit["text"] for unit in prepared["article_units"]]
+        self.assertFalse(any(text.startswith("文章ID") for text in texts))
+        self.assertFalse(any(text.startswith("文章版本") for text in texts))
+        self.assertIn("IP67 certified.", texts)
+
+    def test_renderer_rejects_claim_attached_to_unrelated_quote(self) -> None:
+        prepared = self.run_prepare()
+        judgments = self.valid_judgments(prepared)
+        question = next(unit for unit in prepared["article_units"] if unit["text"].startswith("Which option"))
+        judgments["claims"][0]["unit_id"] = question["unit_id"]
+        judgments["claims"][0]["article_line"] = question["line"]
+        judgments["claims"][0]["article_quote"] = question["text"]
+        self.judgments.write_text(json.dumps(judgments, ensure_ascii=False, indent=2), encoding="utf-8")
+        with self.assertRaisesRegex(ValueError, "not traceable"):
             discover_cases(self.work)
 
     def test_renderer_rejects_supported_evidence_from_blocked_section(self) -> None:
