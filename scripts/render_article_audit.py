@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import html
 import json
 import re
@@ -16,10 +17,19 @@ from audit_common import (
     public_chunk,
     read_text,
 )
+from manage_handoff_contract import ManagedHandoffError, load_contract, validate_event, validate_version
 
 
 MODE = "DeepEval Faithfulness 规则复现（Codex 评审，非 DeepEval 官方运行）"
 VALID_VERDICTS = {"supported", "unsupported"}
+
+
+def sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
 
 
 def load_json(path: Path) -> dict:
@@ -43,16 +53,25 @@ def safe_name(value: str) -> str:
     return cleaned or "article"
 
 
-def validate_prepared(prepared: dict, prepared_path: Path) -> tuple[Path, list[Path], dict[str, list[dict]]]:
+def validate_prepared(
+    prepared: dict,
+    prepared_path: Path,
+    article_override: Path | None = None,
+    knowledge_override: list[Path] | None = None,
+) -> tuple[Path, list[Path], dict[str, list[dict]]]:
     if str(prepared.get("schema_version")) != "1.0":
         raise ValueError(f"{prepared_path.name}: unsupported prepared schema_version")
 
-    article_path = Path(str(prepared.get("article_file", "")))
+    original_article_path = Path(str(prepared.get("article_file", "")))
+    article_path = article_override or original_article_path
     if not article_path.is_file():
         raise ValueError(f"{prepared_path.name}: current article file is missing")
-    knowledge_paths = [Path(str(path)) for path in prepared.get("knowledge_files", [])]
+    original_knowledge_paths = [Path(str(path)) for path in prepared.get("knowledge_files", [])]
+    knowledge_paths = knowledge_override or original_knowledge_paths
     if not knowledge_paths or any(not path.is_file() for path in knowledge_paths):
         raise ValueError(f"{prepared_path.name}: one or more current knowledge files are missing")
+    if knowledge_override and len(knowledge_paths) != len(original_knowledge_paths):
+        raise ValueError(f"{prepared_path.name}: knowledge override count does not match prepared files")
 
     current_article = extract_article(article_path)
     if prepared.get("article_lines") != current_article["article_lines"]:
@@ -66,6 +85,13 @@ def validate_prepared(prepared: dict, prepared_path: Path) -> tuple[Path, list[P
     metadata_id = current_article.get("metadata_article_id")
     if metadata_id and prepared.get("article_id") != metadata_id:
         raise ValueError(f"{prepared_path.name}: article_id does not match current article metadata")
+    metadata_version = current_article.get("metadata_article_version")
+    prepared_version = str(prepared.get("article_version", "")).strip()
+    if metadata_version and prepared_version and prepared_version != metadata_version:
+        raise ValueError(f"{prepared_path.name}: article_version does not match current article metadata")
+    recorded_article_hash = str(prepared.get("article_sha256", "")).strip().lower()
+    if recorded_article_hash and recorded_article_hash != sha256_file(article_path):
+        raise ValueError(f"{prepared_path.name}: article SHA-256 no longer matches the current article")
 
     expected_chunks: list[dict] = []
     eligible_by_file: dict[str, list[dict]] = {}
@@ -77,10 +103,17 @@ def validate_prepared(prepared: dict, prepared_path: Path) -> tuple[Path, list[P
         expected_chunks.extend(public_chunk(chunk) for chunk in current_chunks)
 
     prepared_chunks = []
+    source_aliases = {
+        normalized_path(old): current.resolve()
+        for old, current in zip(original_knowledge_paths, knowledge_paths)
+    }
     for item in prepared.get("knowledge_chunks", []):
+        source_file = normalized_path(item.get("source_file", ""))
+        if source_file in source_aliases:
+            source_file = normalized_path(source_aliases[source_file])
         prepared_chunks.append(
             {
-                "source_file": normalized_path(item.get("source_file", "")),
+                "source_file": source_file,
                 "section": item.get("section", ""),
                 "line_start": item.get("line_start"),
                 "line_end": item.get("line_end"),
@@ -92,6 +125,11 @@ def validate_prepared(prepared: dict, prepared_path: Path) -> tuple[Path, list[P
     ]
     if prepared_chunks != normalized_expected:
         raise ValueError(f"{prepared_path.name}: prepared knowledge chunks no longer match current files")
+    recorded_knowledge_hashes = prepared.get("knowledge_sha256")
+    if recorded_knowledge_hashes:
+        actual_knowledge_hashes = [sha256_file(path) for path in knowledge_paths]
+        if recorded_knowledge_hashes != actual_knowledge_hashes:
+            raise ValueError(f"{prepared_path.name}: knowledge SHA-256 no longer matches current files")
     return article_path.resolve(), [path.resolve() for path in knowledge_paths], eligible_by_file
 
 
@@ -100,8 +138,12 @@ def validate_case(
     judgments: dict,
     prepared_path: Path,
     judgment_path: Path,
+    article_override: Path | None = None,
+    knowledge_override: list[Path] | None = None,
 ) -> list[dict]:
-    article_path, knowledge_paths, eligible_by_file = validate_prepared(prepared, prepared_path)
+    article_path, knowledge_paths, eligible_by_file = validate_prepared(
+        prepared, prepared_path, article_override, knowledge_override
+    )
     if str(judgments.get("schema_version")) != "1.0":
         raise ValueError(f"{judgment_path.name}: unsupported judgment schema_version")
     article_id = prepared["article_id"]
@@ -112,11 +154,39 @@ def validate_case(
 
     units = {unit["unit_id"]: unit for unit in prepared["article_units"]}
     source_paths = {normalized_path(path) for path in knowledge_paths}
+    original_source_paths = [Path(str(path)).resolve() for path in prepared.get("knowledge_files", [])]
+    source_aliases = {
+        normalized_path(old): current
+        for old, current in zip(original_source_paths, knowledge_paths)
+    }
     article_source_lines = read_source_lines(article_path)
     seen: set[str] = set()
     claims = judgments.get("claims")
     if not isinstance(claims, list):
         raise ValueError(f"{judgment_path.name}: claims must be an array")
+
+    def claim_is_traceable_to_quote(quote: str, atomic_claim: str) -> bool:
+        """Reject obvious quote/claim swaps while allowing concise normalization."""
+        quote_plain = normalized(quote).lower()
+        claim_plain = normalized(atomic_claim).lower()
+        ascii_terms = lambda value: {
+            term for term in re.findall(r"[a-z0-9]+", value)
+            if len(term) >= 3 and term not in {
+                "the", "and", "for", "with", "that", "this", "from", "are", "was",
+                "were", "has", "have", "can", "will", "into", "its", "your", "our",
+            }
+        }
+        quote_terms, claim_terms = ascii_terms(quote_plain), ascii_terms(claim_plain)
+        if quote_terms and claim_terms and quote_terms & claim_terms:
+            return True
+        quote_cjk = "".join(re.findall(r"[\u3400-\u9fff]", quote_plain))
+        claim_cjk = "".join(re.findall(r"[\u3400-\u9fff]", claim_plain))
+        if len(quote_cjk) >= 2 and len(claim_cjk) >= 2:
+            quote_bigrams = {quote_cjk[i:i + 2] for i in range(len(quote_cjk) - 1)}
+            claim_bigrams = {claim_cjk[i:i + 2] for i in range(len(claim_cjk) - 1)}
+            if quote_bigrams & claim_bigrams:
+                return True
+        return quote_plain in claim_plain or claim_plain in quote_plain
 
     for index, claim in enumerate(claims, 1):
         claim_id = claim.get("claim_id")
@@ -139,8 +209,16 @@ def validate_case(
             raise ValueError(
                 f"{judgment_path.name}: {claim_id} article_quote is not an exact substring of the current article line"
             )
-        if not str(claim.get("claim", "")).strip():
+        atomic_claim = str(claim.get("claim", "")).strip()
+        if not atomic_claim:
             raise ValueError(f"{judgment_path.name}: {claim_id} has an empty atomic claim")
+        if not claim_is_traceable_to_quote(quote, atomic_claim):
+            note = str(claim.get("derivation_note", "")).strip()
+            if len(note) < 12:
+                raise ValueError(
+                    f"{judgment_path.name}: {claim_id} atomic claim is not traceable to article_quote; "
+                    "the quote may be attached to the wrong unit"
+                )
         verdict = claim.get("verdict")
         if verdict not in VALID_VERDICTS:
             raise ValueError(f"{judgment_path.name}: {claim_id} has invalid verdict {verdict!r}")
@@ -152,6 +230,11 @@ def validate_case(
         for item in evidence:
             source_file = item.get("source_file", "")
             source_path = Path(source_file).resolve() if source_file else None
+            if source_path and normalized_path(source_path) not in source_paths:
+                aliased = source_aliases.get(normalized_path(source_path))
+                if aliased:
+                    source_path = aliased
+                    item["source_file"] = str(aliased)
             if not source_path or normalized_path(source_path) not in source_paths:
                 raise ValueError(f"{judgment_path.name}: {claim_id} cites a file outside supplied knowledge context")
             if not item.get("quote"):
@@ -496,7 +579,11 @@ document.querySelectorAll('.filter').forEach(b=>b.addEventListener('click',()=>{
     return output
 
 
-def discover_cases(input_dir: Path) -> list[dict]:
+def discover_cases(
+    input_dir: Path,
+    article_override: Path | None = None,
+    knowledge_override: list[Path] | None = None,
+) -> list[dict]:
     cases = []
     for judgment_path in sorted(input_dir.glob("*-judgments.json")):
         stem = judgment_path.name[: -len("-judgments.json")]
@@ -505,7 +592,9 @@ def discover_cases(input_dir: Path) -> list[dict]:
             raise ValueError(f"Missing prepared JSON for {judgment_path.name}")
         prepared = load_json(prepared_path)
         judgments = load_json(judgment_path)
-        claims = validate_case(prepared, judgments, prepared_path, judgment_path)
+        claims = validate_case(
+            prepared, judgments, prepared_path, judgment_path, article_override, knowledge_override
+        )
         cases.append({"prepared": prepared, "judgments": judgments, "claims": claims})
     if not cases:
         raise ValueError(f"No *-judgments.json files found in {input_dir}")
@@ -514,15 +603,105 @@ def discover_cases(input_dir: Path) -> list[dict]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--input-dir", type=Path, required=True)
-    parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument("--input-dir", type=Path)
+    parser.add_argument("--output-dir", type=Path)
+    parser.add_argument(
+        "--result-dir",
+        type=Path,
+        help="v0.6受管模式：prepared、judgments和报告均位于同一文章版本目录。",
+    )
+    parser.add_argument("--article-id", help="受管模式下用于确认目录中只有当前文章的结果。")
+    parser.add_argument("--article-version", help="受管模式下用于确认prepared的文章版本。")
+    parser.add_argument("--article", type=Path, help="移动任务后复核时传入当前40_最终文章.md。")
+    parser.add_argument(
+        "--knowledge",
+        type=Path,
+        action="append",
+        help="移动任务后复核时传入当前30_本篇知识库资料.md；可重复但v0.6只能一个。",
+    )
     args = parser.parse_args()
-    cases = discover_cases(args.input_dir)
-    args.output_dir.mkdir(parents=True, exist_ok=True)
-    outputs = [str(write_detail(case, args.output_dir).resolve()) for case in cases]
-    outputs.append(str(write_summary(cases, args.output_dir).resolve()))
-    outputs.append(str(write_html(cases, args.output_dir).resolve()))
-    print(json.dumps({"articles": len(cases), "outputs": outputs}, ensure_ascii=False, indent=2))
+
+    if args.result_dir and args.input_dir:
+        raise SystemExit("Do not combine --result-dir with --input-dir")
+    managed = args.result_dir is not None
+    if managed:
+        input_dir = args.result_dir.resolve()
+        output_dir = args.output_dir.resolve() if args.output_dir else input_dir
+        if not input_dir.is_dir():
+            raise SystemExit(f"Managed result directory not found: {input_dir}")
+        if output_dir == input_dir and (input_dir / "faithfulness_summary.md").exists():
+            raise SystemExit(f"Refusing to overwrite existing managed summary: {input_dir / 'faithfulness_summary.md'}")
+    else:
+        if not args.input_dir or not args.output_dir:
+            raise SystemExit("Provide --input-dir and --output-dir, or use --result-dir")
+        input_dir, output_dir = args.input_dir, args.output_dir
+
+    if (args.article or args.knowledge) and not args.article:
+        raise SystemExit("--knowledge requires --article when overriding moved v0.6 sources")
+    if args.article and not args.knowledge:
+        raise SystemExit("--article requires --knowledge when overriding moved v0.6 sources")
+    if args.knowledge and len(args.knowledge) != 1 and managed:
+        raise SystemExit("Managed v0.6 review accepts exactly one --knowledge override")
+
+    cases = discover_cases(input_dir, args.article, args.knowledge)
+    if managed:
+        if len(cases) != 1:
+            raise SystemExit("A managed result directory must contain exactly one article audit")
+        if len(list(input_dir.glob("*-prepared.json"))) != 1 or len(list(input_dir.glob("*-judgments.json"))) != 1:
+            raise SystemExit("A managed result directory must contain exactly one prepared and one judgments artifact")
+        prepared = cases[0]["prepared"]
+        if prepared.get("integration_mode") != "manage-article-knowledge-v0.6":
+            raise SystemExit("Managed result directory contains a non-v0.6 prepared artifact")
+        if not str(prepared.get("project_id", "")).strip():
+            raise SystemExit("Managed prepared artifact is missing project_id")
+        if input_dir.parent.parent.name != str(prepared.get("project_id", "")):
+            raise SystemExit("Managed result directory project_id does not match prepared artifact")
+        try:
+            _, contract = load_contract()
+            contract_version = validate_version(
+                str(prepared.get("handoff_contract_version", "")), contract
+            )
+        except ManagedHandoffError as exc:
+            raise SystemExit(str(exc)) from exc
+        if args.article_id and prepared.get("article_id") != args.article_id:
+            raise SystemExit("Managed result directory article_id does not match --article-id")
+        if args.article_version and prepared.get("article_version") != args.article_version:
+            raise SystemExit("Managed result directory article_version does not match --article-version")
+        expected_dir_version = "v" + str(prepared.get("article_version", "")).strip().lstrip("vV")
+        if input_dir.name != expected_dir_version or input_dir.parent.name != str(prepared.get("article_id", "")):
+            raise SystemExit("Managed result directory must end with [article_id]/v[version]")
+        try:
+            validate_event(
+                "faithfulness_completed",
+                {
+                    "handoff_event": "faithfulness_completed",
+                    "handoff_contract_version": contract_version,
+                    "result_dir": str(input_dir.resolve()),
+                    "article_id": prepared.get("article_id", ""),
+                    "article_version": prepared.get("article_version", ""),
+                },
+                contract,
+            )
+        except ManagedHandoffError as exc:
+            raise SystemExit(str(exc)) from exc
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    outputs = [str(write_detail(case, output_dir).resolve()) for case in cases]
+    outputs.append(str(write_summary(cases, output_dir).resolve()))
+    outputs.append(str(write_html(cases, output_dir).resolve()))
+    payload = {"articles": len(cases), "outputs": outputs}
+    if managed:
+        prepared = cases[0]["prepared"]
+        payload.update(
+            {
+                "handoff_event": "faithfulness_completed",
+                "handoff_contract_version": prepared.get("handoff_contract_version", ""),
+                "result_dir": str(input_dir.resolve()),
+                "article_id": prepared.get("article_id", ""),
+                "article_version": prepared.get("article_version", ""),
+            }
+        )
+    print(json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":

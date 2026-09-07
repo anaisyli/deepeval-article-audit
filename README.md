@@ -1,250 +1,168 @@
-# 文章知识库支持率评审 Skill
+# deepeval-article-audit
 
-`deepeval-article-audit` 用来检查已完成文章中的事实主张，有多少能够由写作时实际提供的知识文件支持。它复现 DeepEval Faithfulness 的核心拆分、判断和计算逻辑，但由当前 Codex 评审，不调用 DeepEval 官方程序、默认评审模型或额外 evaluator API。
+用于审核已经完成的文章，判断文章中的原子事实主张是否得到写作时实际提供的知识附件支持。
 
-当前版本：`v1.1.0`。已与 `manage-article-knowledge v0.5` 的输入边界和结果导入契约完成端到端兼容验证。
-
-所有分数和交付物必须标注：
+结果统一标注为：
 
 > DeepEval Faithfulness 规则复现（Codex 评审，非 DeepEval 官方运行）
 
-## 它回答什么问题
+本 Skill 不调用 DeepEval 官方 API，不声称生成官方 DeepEval 分数。
+
+## 在整条流程中的位置
 
 ```text
-Faithfulness = 有知识文件支持的原子事实主张数 ÷ 文章全部原子事实主张数
+任意写作 Skill
+→ writing_request
+→ manage-article-knowledge
+→ 15 检索、正式 Claim、20 审核、30/35
+→ writing_ready
+→ 写作 Skill 生成终稿
+→ writing_completed
+→ 知识库规范化 40_最终文章.md
+→ faithfulness_request
+→ deepeval-article-audit
+→ faithfulness_completed
+→ 知识库导入并进入 40_已完成
 ```
 
-它衡量的是“文章事实能否由指定写作上下文支持”，不是原文复制率、连续词覆盖率或文章整体质量。文章可以改写、换序或使用同义表达；只要没有增加实质信息，仍可判为支持。
+Faithfulness 只负责中间审核事件。`faithfulness_completed` 表示审核结果已经生成并校验，不表示文章流程完成；知识库导入成功、更新治理记录并迁移到 `40_已完成` 后，才返回 `article_completed`。
 
-本 Skill 不替代：
+## 与知识库和任意写作 Skill 的交接
 
-- RAGSEO 逐字引用率、词组覆盖率或查重率；
-- SEO/GEO、文风、合规、可发布性或文章整体质量评价；
-- 事实真伪的开放网络调查；
-- DeepEval 官方运行结果。
+知识库 Skill 是唯一调用方和结果接收方。任意写作 Skill 不直接修改 Faithfulness 结果，也不把完整知识库交给审核器。写作 Skill 只负责：
 
-## 当前报告采用双层口径
+1. 保存本次写作需求记录；
+2. 按知识库合同提交 `writing_request`；
+3. 收到 `writing_ready` 和当前 `30_本篇知识库资料.md` 后写作；
+4. 返回终稿正文绝对路径，形成 `writing_completed`。
 
-### 1. 原子事实主张支持率
-
-这是唯一的 Faithfulness 主指标。复合陈述会拆成能够分别判断真假的最小主张，每条只使用 `supported` 或 `unsupported`，不计部分分。
-
-例如：
+知识库随后规范化终稿并发出：
 
 ```text
-Model A uses a xenon lamp and covers 190–900 nm.
+handoff_event: faithfulness_request
+handoff_contract_version
+project_id
+article_id
+article_version
+article_file: 当前 40_最终文章.md
+knowledge_file: 当前 30_本篇知识库资料.md
+result_root
+result_dir
 ```
 
-会拆为两条事实主张，因此分母增加 2。
+本 Skill 运行时定位当前已安装的 `manage-article-knowledge` Skill，读取其唯一的 `references/handoff-contract.json`，并校验合同版本、项目 ID、文章 ID、文章版本和路径。不得把某台电脑的绝对安装路径或第二份完整合同写入本 Skill。
 
-### 2. 内容单元诊断
-
-预处理器会把正文确定性切分为可追踪的 `articleUnit`，通常是一句话、一个列表项或一行表格数据。报告标明每个单元：
-
-- 是否包含事实主张；
-- 若包含事实，是全部支持、部分支持还是完全不支持；
-- 对应的 `unit_id`、原始行号和原子主张数量。
+审核成功后返回：
 
 ```text
-事实内容占比 = 含事实主张的文章单元数 ÷ 全部文章单元数
+handoff_event: faithfulness_completed
+handoff_contract_version: 与请求相同
+result_dir: 当前文章版本专属结果目录
+article_id: 当前文章ID
+article_version: 当前文章版本
 ```
 
-事实内容占比只是正文结构诊断，不是 Faithfulness，也不表示相同比例的文字来自知识库。`v1.1.0` 的高亮网页直接按最小内容单元呈现；同一 Markdown 行内的多个句子会拆成独立卡片，不再合并成一个颜色块。
+知识库收到该事件后负责导入结果、更新 `50_文章知识使用与Faithfulness记录.md`、Claim 支撑、知识缺口和文章状态。不要直接写入知识库的 Faithfulness CSV、`50` 或 Claim 支撑表。
 
-## 输入要求
+## 找不到审核 Skill 时
 
-最少提供：
+如果知识库无法检测到本 Skill，必须在对话中明确说明“未检测到 `deepeval-article-audit` Skill”，并告诉内容运营安装它或提供 Skill 目录。任务保留在 `30_等待Faithfulness`，不能只返回一个机器字段，也不能静默切换成未确认的外部审核流程。
 
-1. 一篇或多篇已完成文章；
-2. 每篇文章写作时实际允许使用的知识文件；
-3. 一个不会覆盖源文件的结果目录。
+合同缺失、版本不兼容、执行器名称不符、身份不一致、哈希不一致或结果目录不正确时，停止当前审核并说明具体原因；不得猜测、扫描宽泛目录或覆盖旧结果。
 
-通用审核可以接收多个明确提供的知识文件。若文章和知识文件存在多种合理配对，且选择会改变结果，Skill 会先询问一个简短问题，不会自行混用。
+## 固定输入边界
 
-### `manage-article-knowledge v0.5` 严格配对
+在 `manage-article-knowledge v0.6` 受管模式下，只读取两份当前文件：
 
-| 角色 | 唯一文件 |
-|---|---|
-| 待审核文章 | `40_最终文章.md` |
-| 事实上下文 | 当前 `30_本篇知识库资料.md` |
+1. `40_最终文章.md`：知识库规范化后的终稿文字和表格；
+2. `30_本篇知识库资料.md`：写作时交给 Writer 的唯一知识库事实附件。
 
-在 v0.5 模式中只能使用当前 `30` 作为事实输入。不要追加：
+不得把 `35_写作素材来源索引.md`、正式 Claim、完整项目知识库、原始随文资料、写作规则、SEO/GEO 说明或文章配图加入审核上下文。`35`只在结果回到知识库后，用于把 `30`证据正文映射到正式 Claim。
 
-- `35_写作素材来源索引.md`；
-- Formal Claim 或整个项目知识库；
-- 原始随文事实文件；
-- SEO/GEO 规则、写作提示或评价说明；
-- 网页搜索结果、模型记忆或最终文章本身。
+## 结果目录和输出
 
-随文事实资料应先由 `manage-article-knowledge` 纳入来源记录、Formal Claim 和当前 `30/35`，再进行审核。
+`result_dir` 必须是当前文章版本专属目录；缺失的项目、文章和版本子目录由本 Skill 自动创建：
 
-## 在 Codex 中使用
+```text
+[结果根目录]/[项目ID]/[文章ID]/v[文章版本]/
+├── [文章ID]-prepared.json
+├── [文章ID]-judgments.json
+└── faithfulness_summary.md
+```
 
-单篇审核示例：
+已有当前版本核心结果时拒绝覆盖；文章修订必须由知识库递增文章版本后重新审核。
+
+另外生成两类便于人工复查的报告：
+
+- `<文章ID>_faithfulness_details.md`：逐条事实主张、判断、证据和行号；
+- `faithfulness_highlight.html`：按文章单元展示事实/非事实、支持状态和证据。
+
+受管模式下，三个核心文件保留在 `result_dir`，可由知识库导入；详细 Markdown 和 HTML 是复查报告，不直接写入知识库台账。
+
+## 计算口径
+
+```text
+Faithfulness = 支持的原子事实主张数 ÷ 全部原子事实主张数
+```
+
+- 标题、小标题、网址、元数据、导航、纯修辞、纯建议和管理文字不进入分母。
+- 复合句拆成可分别判断的原子事实；不使用部分分。
+- 改写、同义替换和合理直接推导可以算支持，但每条支持主张必须有知识文件连续原文证据。
+- `30`只有第一至第三节中明确标记为“证据正文（供Faithfulness核验）”的内容可以作为正向证据。
+- 第四至第六节、英文表达表、没有证据正文的数据展示表和写作控制文字不能作为正向证据。
+- 不支持表示当前知识附件没有依据，不等于事实必然错误，也不等于文章整体不合格。
+
+报告同时显示两层信息：
+
+1. 内容单元诊断：事实单元、非事实单元，以及全部/部分/完全支持；
+2. 原子事实主张支持率：唯一进入 Faithfulness 主指标的统计。
+
+“事实内容占比”不是 Faithfulness、引用率、SEO/GEO 分数或文章质量评分。
+
+## 独立或旧版使用
+
+可以直接提供一篇或多篇文章及其对应知识文件。非受管模式允许显式提供多个知识文件，但每篇文章必须能明确配对；无法配对时先询问，不自行混用。
+
+示例：
 
 ```text
 使用 $deepeval-article-audit。
-文章文件：D:\项目\04_文章任务\30_等待Faithfulness\ART-001_文章标题\40_最终文章.md
-知识文件：D:\项目\04_文章任务\30_等待Faithfulness\ART-001_文章标题\30_本篇知识库资料.md
-输出目录：D:\项目外部审核结果
+文章文件：<article.md>
+知识文件：<knowledge.md>
+输出目录：<new-output-directory>
 ```
 
-批量审核示例：
+在 v0.5/v0.6 项目中，不要用通用入口绕过当前 `30`、文章身份、版本和结果目录合同。
 
-```text
-使用 $deepeval-article-audit，审核这个目录内全部待评审文章。
-每个任务目录中的 40_最终文章.md 是文章，
-30_本篇知识库资料.md 是唯一事实上下文。
-把结果写到新的外部审核目录，不要覆盖源文件。
-```
-
-不需要提供额外 API Key；运行消耗当前 Codex 的正常使用额度。
-
-## 审核流程
-
-```text
-确认文章与知识文件配对
-→ 预处理正文和可用知识块，生成 prepared JSON
-→ 逐个检查全部 articleUnit，不抽样
-→ 提取每条可独立核验的原子事实主张
-→ 只用已提供的知识上下文判断 supported / unsupported
-→ 写入 judgments JSON
-→ 校验证据原文、行号、schema、文件哈希和 v0.5 证据边界
-→ 批量渲染 Markdown 明细、稳定汇总表和交互式高亮网页
-```
-
-预处理命令：
-
-```text
-python scripts/prepare_article_audit.py \
-  --article <article.md> \
-  --knowledge <knowledge.md> \
-  --output <article-id>-prepared.json
-```
-
-批量渲染命令：
-
-```text
-python scripts/render_article_audit.py \
-  --input-dir <work-output-directory> \
-  --output-dir <final-output-directory>
-```
-
-实际执行时，评审者必须读取 [method.md](references/method.md) 中的完整判断口径和 judgments JSON 契约。
-
-## 证据判断规则
-
-进入分母的是正文中全部可以独立判断真假的事实主张。标题、小标题、URL、目录、元数据、纯问题、纯指令，以及不含事实理由的建议或修辞不进入分母。
-
-一条主张判为 `supported` 时，必须至少提供一处：
-
-- 知识文件绝对路径；
-- 原始行号范围；
-- 从知识文件逐字复制的连续原文；
-- 原文如何支持主张的简短理由。
-
-文章引用和知识证据都必须是原始 Markdown 的连续子串。若引用范围含有 `**`、反引号、链接语法或引用符号，也必须原样保留。
-
-以下情况判为 `unsupported`：
-
-- 知识上下文完全没有依据；
-- 只支持复合主张的一部分且无法进一步拆分；
-- 文章扩大了适用范围或增加了新结论；
-- 文章与知识上下文矛盾；
-- 说法可能符合常识，但本次知识上下文没有证明。
-
-### v0.5 的证据正文边界
-
-审核当前 `30_本篇知识库资料.md` 时，只有第 1 至第 3 节内明确位于“证据正文（供Faithfulness核验）”标题下的内容可以作为正向证据，且引用起止行必须完整落在同一个证据正文块中。
-
-以下内容不能作为支持证据：直接写作事实、英文表达表、没有配套证据正文的数据展示表、按大纲使用建议、生成控制和缺口处理。审核过程不读取 `35`；后续由 `manage-article-knowledge` 使用 `35` 将证据行范围映射回 Formal Claim。
-
-## 输出文件
-
-### 人工可读结果
-
-| 文件 | 内容 |
-|---|---|
-| `<文章编号>_faithfulness_details.md` | 内容单元诊断，以及一行一条原子事实主张的证据明细 |
-| `faithfulness_summary.md` | 每篇文章的分子、分母、不支持数和 Faithfulness；主表后追加内容单元诊断 |
-| `faithfulness_highlight.html` | 全文内容单元卡片、状态着色、筛选和同卡片证据展开 |
-
-高亮网页提供“全部、事实、全部支持、不支持、非事实”筛选。非事实单元灰显，事实单元按支持聚合状态着色；证据、判断和理由与对应文章单元保存在同一可展开卡片中，不使用脱离正文的固定证据面板。
-
-### 审计轨迹
-
-```text
-<文章编号>-prepared.json
-<文章编号>-judgments.json
-```
-
-prepared JSON 保存文章单元、知识块、候选证据和输入文件顺序；judgments JSON 保存原子主张、判断、文章原文和证据原文。渲染器会重新读取当前源文件，拒绝已经失效的行号、引文、schema 或证据边界。
-
-### 交给 `manage-article-knowledge v0.5` 的文件
-
-导入必需文件固定为：
-
-1. `<文章编号>-prepared.json`；
-2. `<文章编号>-judgments.json`；
-3. 原始 `faithfulness_summary.md`。
-
-还要按 prepared JSON 中 `knowledge_files` 的原始顺序提供文章和知识文件。不要手工修改、重排列或美化这三个导入产物；明细 Markdown 和高亮 HTML 是人工审核输出，不是导入必需文件。本 Skill 不直接写入知识项目的 Faithfulness CSV，导入事务由接收方负责。
-
-## 如何理解结果
-
-```text
-支持主张数：38
-全部事实主张数：56
-Faithfulness：38 ÷ 56 = 67.86%
-```
-
-这表示 56 条事实主张中有 38 条能由指定知识上下文支持。它不表示文章有 67.86% 的文字复制自知识库，也不表示剩余内容必然错误。
-
-不同 Skill 版本、知识文件、文章版本或拆分规则可能产生不同分母。只有同一版本、同一输入和同一口径的结果适合直接比较；规则升级后应保留旧结果并重新建立基线。
-
-复查时优先关注：
-
-1. 不支持主张是否确实缺少本次知识上下文；
-2. 复合事实是否拆分得合理；
-3. 证据原文是否真正支持文章主张；
-4. 产品参数、公司事实、认证、案例和数据是否有明确证据；
-5. 是否漏交了写作时真实使用的知识文件。
-
-若输入文件漏交或发生变化，应重新运行审核，不要直接把 judgments 中的结论改成支持。
-
-## 目录
+## 目录和维护
 
 ```text
 deepeval-article-audit/
-├── CHANGELOG.md
-├── README.md
 ├── SKILL.md
-├── agents/
-│   └── openai.yaml
+├── README.md
+├── CHANGELOG.md
 ├── references/
-│   └── method.md
+│   ├── method.md
+│   └── manage-article-knowledge-v06-integration.md
 ├── scripts/
-│   ├── audit_common.py
 │   ├── prepare_article_audit.py
-│   └── render_article_audit.py
+│   ├── render_article_audit.py
+│   └── manage_handoff_contract.py
 └── tests/
-    └── test_audit_pipeline.py
 ```
 
-- `SKILL.md`：执行流程、输入边界和强制输出；
-- `references/method.md`：原子主张、证据判断、JSON schema 和报告口径；
-- `CHANGELOG.md`：行为、兼容性和呈现层更新；
-- `audit_common.py`：预处理与渲染共用的确定性解析；
-- `prepare_article_audit.py`：生成文章单元、知识块和候选证据；
-- `render_article_audit.py`：验证输入与判断并生成全部报告；
-- `test_audit_pipeline.py`：端到端管线和 v0.5 兼容性回归。
+- `SKILL.md`：执行流程和硬性边界；
+- `references/method.md`：事实拆分、证据判断和 JSON 结构；
+- `references/manage-article-knowledge-v06-integration.md`：v0.6 受管适配说明，不复制完整合同；
+- `scripts/prepare_article_audit.py`：建立文章单元、事实主张和候选证据；
+- `scripts/render_article_audit.py`：校验判断并生成明细、汇总和网页；
+- `CHANGELOG.md`：版本、schema、输出和兼容性变化。
 
-## 当前限制与维护
+修改事实拆分、证据范围、JSON schema、输出合同或知识库兼容性时，必须同步更新 `CHANGELOG.md`，并运行现有测试。
 
-- 语义拆分和支持判断由当前 Codex 模型完成，边界主张仍可能需要人工复核；
-- 知识上下文缺失会直接降低支持率；
-- 输入应是能够稳定读取并保留行号的本地文本或 Markdown；PDF、Word 等应先转换；
-- prepared 与 judgments 当前使用 `schema_version: 1.0`；
-- `faithfulness_summary.md` 的主表列顺序和数值必须保持稳定，以兼容 v0.5 导入；内容单元诊断只能追加在主表之后。
+## 限制
 
-凡是修改事实拆分、证据规则、schema、验证逻辑、报告格式或外部 Skill 兼容性，都必须同步更新 [CHANGELOG.md](CHANGELOG.md)，并说明用户可见影响和兼容性边界。
+- 这是 Codex 对 DeepEval Faithfulness 规则的复现，不是官方 DeepEval 运行。
+- 评审由当前 Codex 模型完成，少数语义边界可能需要人工复核。
+- 知识附件缺少事实会降低支持率；这不能单独证明文章事实错误。
+- 不同 Skill 版本、文章拆分口径或知识附件下的分数不能直接比较。
