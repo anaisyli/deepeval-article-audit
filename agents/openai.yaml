@@ -1,0 +1,4 @@
+interface:
+  display_name: "文章知识库支持率评审"
+  short_description: "按DeepEval Faithfulness规则复现文章知识支持率并交接v0.6结果"
+  default_prompt: "Use $deepeval-article-audit to audit my finished article against its current 30_本篇知识库资料.md and 40_最终文章.md, or run the manage-article-knowledge v0.6 controlled handoff with the supplied article ID, version, and result directory."
