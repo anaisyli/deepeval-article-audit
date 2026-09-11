@@ -573,9 +573,60 @@ class AuditPipelineTests(unittest.TestCase):
         "Set MANAGE_ARTICLE_KNOWLEDGE_V05 to run the external import contract test.",
     )
     def test_manage_v05_importer_accepts_artifacts(self) -> None:
+        manage_root = Path(os.environ["MANAGE_ARTICLE_KNOWLEDGE_V05"])
+        project = self.root / "TEST-PROJECT_测试知识库"
+        source_root = self.root / "source"
+        source_root.mkdir()
+        subprocess.run(
+            [
+                sys.executable,
+                str(manage_root / "scripts" / "initialize_project.py"),
+                "--project",
+                str(project),
+                "--project-name",
+                "测试项目",
+                "--source-root",
+                str(source_root),
+                "--website",
+                "https://example.com/",
+                "--content-owner",
+                "测试负责人",
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        task = (
+            project
+            / "04_文章任务"
+            / "30_等待Faithfulness"
+            / "ART-V05-001_Product_Guide"
+        )
+        task.mkdir(parents=True)
+        self.article.replace(task / self.article.name)
+        self.knowledge.replace(task / self.knowledge.name)
+        (self.root / "35_写作素材来源索引.md").replace(
+            task / "35_写作素材来源索引.md"
+        )
+        self.article = task / "40_最终文章.md"
+        self.knowledge = task / "30_本篇知识库资料.md"
+        formal = project / "03_正式知识/10_客户知识/20_产品介绍/product.md"
+        formal.write_text(
+            "# 测试产品\n\n"
+            "## IP67认证\n\n- Claim ID：CLM-TEST-PRODUCT-001\n\n"
+            "## 双协议支持\n\n- Claim ID：CLM-TEST-PRODUCT-002\n\n"
+            "## 测试产品范围\n\n- Claim ID：CLM-TEST-PRODUCT-003\n",
+            encoding="utf-8",
+        )
         prepared = self.run_prepare()
+        judgments = self.valid_judgments(prepared)
+        # This compatibility test isolates artifact import and Claim mapping.
+        # Unsupported governance requires a separate project disposition file.
+        judgments["claims"] = [
+            claim for claim in judgments["claims"] if claim["claim_id"] != "C003"
+        ]
         self.judgments.write_text(
-            json.dumps(self.valid_judgments(prepared), ensure_ascii=False, indent=2),
+            json.dumps(judgments, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
         subprocess.run(
@@ -592,10 +643,9 @@ class AuditPipelineTests(unittest.TestCase):
             text=True,
         )
 
-        manage_root = Path(os.environ["MANAGE_ARTICLE_KNOWLEDGE_V05"])
-        metrics = self.root / "10_文章Faithfulness明细.csv"
-        support = self.root / "20_Claim文章支撑记录.csv"
-        receipt = self.root / "50_Faithfulness结果.md"
+        metrics = project / "05_数据与审核/10_Faithfulness/10_文章Faithfulness明细.csv"
+        support = project / "05_数据与审核/10_Faithfulness/20_Claim文章支撑记录.csv"
+        receipt = task / "50_文章知识使用与Faithfulness记录.md"
         result = subprocess.run(
             [
                 sys.executable,
@@ -625,10 +675,14 @@ class AuditPipelineTests(unittest.TestCase):
             capture_output=True,
             text=True,
         )
-        self.assertIn("faithfulness=66.67%", result.stdout)
+        self.assertIn("faithfulness=100.00%", result.stdout)
         self.assertTrue(metrics.is_file())
         self.assertTrue(support.is_file())
-        self.assertTrue(receipt.is_file())
+        completed_task = project / "04_文章任务/40_已完成" / task.name
+        self.assertFalse(task.exists())
+        self.assertTrue(
+            (completed_task / "50_文章知识使用与Faithfulness记录.md").is_file()
+        )
         support_text = support.read_text(encoding="utf-8-sig")
         self.assertIn("CLM-TEST-PRODUCT-001", support_text)
         self.assertIn("CLM-TEST-PRODUCT-003", support_text)

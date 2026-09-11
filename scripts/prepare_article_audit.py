@@ -16,6 +16,7 @@ from pathlib import Path
 from audit_common import (
     TERM_RE,
     extract_article,
+    article_content_sha256,
     extract_knowledge_chunks,
     is_v05_writing_material,
     parse_field,
@@ -238,6 +239,7 @@ def main() -> None:
         "article_file": str(args.article.resolve()),
         "knowledge_files": [str(path.resolve()) for path in args.knowledge],
         "article_sha256": sha256_file(args.article),
+        "article_content_sha256": article_content_sha256(article["article_lines"]),
         "knowledge_sha256": [sha256_file(path) for path in args.knowledge],
         "integration_mode": "manage-article-knowledge-v0.6" if managed else "generic",
         "handoff_contract_version": contract_version,

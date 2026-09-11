@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +67,12 @@ def visible_body_line(line: str) -> str:
         cells = [normalize_inline_markdown(cell) for cell in line.strip().strip("|").split("|")]
         return " | ".join(cell for cell in cells if cell)
     return normalize_inline_markdown(line)
+
+
+def article_content_sha256(article_lines: list[dict[str, Any]]) -> str:
+    """Hash the parsed article content, excluding Markdown serialization details."""
+    payload = "\n".join(str(item.get("text", "")) for item in article_lines)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def metadata_article_id(lines: list[str]) -> str | None:

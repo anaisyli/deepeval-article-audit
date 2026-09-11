@@ -3,7 +3,7 @@ name: deepeval-article-audit
 description: Audit finished articles against the exact local fact inputs supplied to the writer by reproducing DeepEval Faithfulness claim extraction, evidence judgment, and supported-claims/total-claims calculation with the current Codex model, without an evaluator API. Use for article support-rate review, unsupported-claim review, claim-to-source mapping, import-ready manage-article-knowledge v0.6 or v0.5 artifacts, Markdown details, batch summaries, or highlighted HTML. Always label results as a Codex reproduction, not an official DeepEval run.
 ---
 
-# DeepEval-style Article Audit v1.3
+# DeepEval-style Article Audit v1.4.1
 
 Evaluate finished article bodies against only the knowledge files supplied by the user. Use the current Codex model as the judge and require no evaluator API key.
 
@@ -63,7 +63,7 @@ Treat only user-supplied knowledge files as `retrieval_context`. Do not use web 
 
    `python scripts/render_article_audit.py --result-dir <result-dir> --article <moved-40_最终文章.md> --knowledge <moved-30_本篇知识库资料.md> --output-dir <review-output-dir>`
 
-   The managed commands reject identity mismatches, extra factual inputs, missing version metadata, malformed `[result root]/[article-id]/v[version]/` directories, and attempts to overwrite an existing core result. A managed `40_最终文章.md` must contain exactly one `<!-- ARTICLE_BODY_START -->` / `<!-- ARTICLE_BODY_END -->` pair. Only text, list items, and table rows inside that pair are auditable article content; metadata, TDK, image plans, delivery notes, and audit administration stay outside it.
+   The managed commands reject identity mismatches, extra factual inputs, missing version metadata, malformed `[result root]/[project-id]/[article-id]/v[version]/` directories, and attempts to overwrite an existing core result. A managed `40_最终文章.md` must contain exactly one `<!-- ARTICLE_BODY_START -->` / `<!-- ARTICLE_BODY_END -->` pair. Only text, list items, and table rows inside that pair are auditable article content; metadata, TDK, image plans, delivery notes, and audit administration stay outside it.
 
    For generic or legacy use, run:
 

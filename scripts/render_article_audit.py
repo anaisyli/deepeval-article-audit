@@ -11,6 +11,7 @@ from pathlib import Path
 
 from audit_common import (
     extract_article,
+    article_content_sha256,
     extract_knowledge_chunks,
     normalize_inline_markdown,
     normalized_path,
@@ -93,7 +94,14 @@ def validate_prepared(
         raise ValueError(f"{prepared_path.name}: article_version does not match current article metadata")
     recorded_article_hash = str(prepared.get("article_sha256", "")).strip().lower()
     if recorded_article_hash and recorded_article_hash != sha256_file(article_path):
-        raise ValueError(f"{prepared_path.name}: article SHA-256 no longer matches the current article")
+        semantic_hash = prepared.get("article_content_sha256")
+        semantic_match = (
+            semantic_hash == article_content_sha256(current_article["article_lines"])
+            if semantic_hash
+            else prepared.get("article_lines") == current_article["article_lines"]
+        )
+        if not semantic_match:
+            raise ValueError(f"{prepared_path.name}: article content no longer matches the current article")
 
     expected_chunks: list[dict] = []
     eligible_by_file: dict[str, list[dict]] = {}

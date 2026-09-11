@@ -1,6 +1,6 @@
 # deepeval-article-audit
 
-DeepEval-style Article Audit v1.3。用于审核已经完成的文章，按写作时实际提供的知识附件提取原子事实主张、判断证据支持情况，并计算支持主张数 / 全部事实主张数。
+DeepEval-style Article Audit v1.4.1。用于审核已经完成的文章，按写作时实际提供的知识附件提取原子事实主张、判断证据支持情况，并计算支持主张数 / 全部事实主张数。
 
 本 Skill 使用当前 Codex 模型完成规则复现，不调用 DeepEval 官方 API，也不声称生成官方 DeepEval 分数。所有分数和交付文件都必须标注：
 
