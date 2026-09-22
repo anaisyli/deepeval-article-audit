@@ -14,6 +14,7 @@ from collections import Counter
 from pathlib import Path
 
 from audit_common import (
+    STRUCTURAL_UNIT_TYPES,
     TERM_RE,
     extract_article,
     article_content_sha256,
@@ -45,6 +46,9 @@ def attach_candidates(units: list[dict], chunks: list[dict], limit: int) -> None
     total = max(1, len(eligible_indexes))
 
     for unit in units:
+        if unit.get("unit_type") in STRUCTURAL_UNIT_TYPES:
+            unit["candidate_evidence"] = []
+            continue
         unit_terms = terms(unit["text"])
         scored: list[tuple[float, int]] = []
         for index in eligible_indexes:
@@ -249,9 +253,14 @@ def main() -> None:
         "knowledge_chunks": [public_chunk(chunk) for chunk in chunks],
         "rules": {
             "headings_excluded": True,
+            "structured_headings_preserved": True,
+            "markdown_images_excluded": True,
+            "homogeneous_enumerations": "one set-valued claim when subject, predicate, scope, condition, time and modality are shared",
             "denominator": "all atomic factual claims in article body",
-            "numerator": "claims supported by supplied knowledge context",
-            "score": "supported / total factual claims",
+            "numerator": "claims with semantic_status=entailed",
+            "score": "strict_support: supported / total factual claims",
+            "deepeval_reproduction": "yes/no/idk; default DeepEval idk behavior is retained for diagnostic comparison",
+            "evaluation_protocol_version": "2.0",
         },
     }
     output.parent.mkdir(parents=True, exist_ok=True)

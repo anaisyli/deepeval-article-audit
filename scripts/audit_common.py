@@ -28,6 +28,30 @@ ADMIN_END_HEADINGS = (
 V05_KNOWLEDGE_NAME = "30_本篇知识库资料.md"
 ARTICLE_BODY_START = "<!-- ARTICLE_BODY_START -->"
 ARTICLE_BODY_END = "<!-- ARTICLE_BODY_END -->"
+STRUCTURAL_UNIT_TYPES = {"title", "heading", "table_header"}
+DOCX_HEADING_STYLE_RE = re.compile(r"<!--\s*MAK_DOCX_HEADING_STYLE:([^>]+?)\s*-->", re.IGNORECASE)
+EFFECT_SIGNAL_RE = re.compile(
+    r"\b(?:because|therefore|so that|prevents?|helps?|improves?|ensures?|allows?|"
+    r"enables?|leads? to|results? in|causes?|changes?|makes?|keeps?|guides?|matches?)\b|"
+    r"(?:因为|所以|因此|防止|避免|帮助|改善|确保|使得|导致|造成|改变|指导|匹配)",
+    re.IGNORECASE,
+)
+METHOD_SIGNAL_RE = re.compile(
+    r"(?:^|\|\s*)(?:use|record|keep|compare|mark|define|check|confirm|document|measure|verify|"
+    r"test|select|choose|avoid|ensure|show|include|exclude|leave)\b|"
+    r"(?:^|\|\s*)(?:使用|记录|保留|比较|标记|定义|检查|确认|核验|测试|选择|避免|确保|展示|纳入|排除)",
+    re.IGNORECASE,
+)
+COMPARISON_SIGNAL_RE = re.compile(
+    r"\b(?:more|less|better|worse|higher|lower|different|same|than|versus|vs\.?)\b|"
+    r"(?:更多|更少|更好|更差|更高|更低|不同|相同|相比|对比)",
+    re.IGNORECASE,
+)
+CONDITION_SIGNAL_RE = re.compile(
+    r"\b(?:if|when|unless|only when|subject to|after|before|during)\b|"
+    r"(?:如果|当|除非|仅当|取决于|之后|之前|期间)",
+    re.IGNORECASE,
+)
 
 
 def read_text(path: Path) -> str:
@@ -40,7 +64,9 @@ def read_text(path: Path) -> str:
 
 
 def normalize_inline_markdown(text: str) -> str:
-    text = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", text)
+    # Image alt text describes an asset; it is not article prose to audit.
+    text = re.sub(r"!\[[^\]]*\]\([^)]*\)", "", text)
+    text = re.sub(r"!\[[^\]]*\](?!\()", "", text)
     text = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", text)
     text = re.sub(r"https?://\S+", "", text)
     text = re.sub(r"<[^>]+>", "", text)
@@ -56,8 +82,28 @@ def markdown_heading(line: str) -> tuple[int, str] | None:
     return len(match.group(1)), normalize_inline_markdown(match.group(2))
 
 
+def heading_source(line: str) -> tuple[str, str]:
+    match = DOCX_HEADING_STYLE_RE.search(line)
+    if match:
+        return "docx_style", match.group(1).strip()
+    return "markdown", ""
+
+
 def is_table_rule(line: str) -> bool:
     return bool(re.fullmatch(r"\s*\|?(?:\s*:?-{3,}:?\s*\|)+\s*", line))
+
+
+def is_table_row(line: str) -> bool:
+    return line.strip().startswith("|") and line.count("|") >= 2
+
+
+def table_column_count(line: str) -> int:
+    value = line.strip()
+    if value.startswith("|"):
+        value = value[1:]
+    if value.endswith("|") and not value.endswith("\\|"):
+        value = value[:-1]
+    return len(re.split(r"(?<!\\)\|", value)) if value else 0
 
 
 def visible_body_line(line: str) -> str:
@@ -98,6 +144,22 @@ def is_v05_writing_material(lines: list[str], path: Path) -> bool:
 
 def split_units(text: str) -> list[str]:
     return [part.strip() for part in SENTENCE_RE.split(text) if CONTENT_RE.search(part)]
+
+
+def claim_review_signals(text: str, source_kind: str) -> list[str]:
+    """Return conservative review hints; signals are not final classifications."""
+    signals: list[str] = []
+    if source_kind == "table_data_row":
+        signals.append("table_data_row")
+    if EFFECT_SIGNAL_RE.search(text):
+        signals.append("effect_or_causal_relation")
+    if METHOD_SIGNAL_RE.search(text):
+        signals.append("operational_method")
+    if COMPARISON_SIGNAL_RE.search(text):
+        signals.append("comparison")
+    if CONDITION_SIGNAL_RE.search(text):
+        signals.append("condition_or_scope")
+    return signals
 
 
 def extract_article(path: Path) -> dict[str, Any]:
@@ -160,6 +222,7 @@ def extract_article(path: Path) -> dict[str, Any]:
     article_lines: list[dict[str, Any]] = []
     units: list[dict[str, Any]] = []
     body_title_found = bool(metadata_title)
+    first_visible_body_line = True
     for index in range(start, end):
         raw = lines[index]
         heading = markdown_heading(raw)
@@ -170,14 +233,64 @@ def extract_article(path: Path) -> dict[str, Any]:
             if heading[0] == 1 and not body_title_found:
                 title = heading[1]
                 body_title_found = True
+            source, source_style = heading_source(raw)
+            normalized_title = normalize_inline_markdown(metadata_title or title).casefold()
+            unit_type = (
+                "title"
+                if heading[0] == 1 and heading[1].casefold() == normalized_title
+                else "heading"
+            )
+            units.append({
+                "unit_id": f"U{len(units) + 1:03d}",
+                "line": index + 1,
+                "text": heading[1],
+                "source_kind": "heading",
+                "unit_type": unit_type,
+                "heading_level": heading[0],
+                "heading_source": source,
+                "heading_style": source_style,
+                "claim_review_signals": [],
+            })
             continue
         text = visible_body_line(raw)
         if not text or not CONTENT_RE.search(text):
             continue
+        if first_visible_body_line and metadata_title and text == normalize_inline_markdown(metadata_title):
+            # Some managed bridges preserve the title as a plain line inside the
+            # body markers.  It remains a title, not an auditable factual unit.
+            first_visible_body_line = False
+            continue
+        first_visible_body_line = False
         line_no = index + 1
         article_lines.append({"line": line_no, "text": text})
+        is_table = is_table_row(raw)
+        source_kind = "prose"
+        if is_table:
+            next_is_rule = index + 1 < end and is_table_rule(lines[index + 1])
+            legacy_header = (
+                not next_is_rule
+                and index + 1 < end
+                and is_table_row(lines[index + 1])
+                and not is_table_rule(lines[index + 1])
+                and (index == start or not is_table_row(lines[index - 1]))
+                and table_column_count(raw) >= 2
+                and table_column_count(raw) == table_column_count(lines[index + 1])
+            )
+            source_kind = (
+                "table_header"
+                if next_is_rule or legacy_header
+                else "table_data_row"
+            )
         for part in split_units(text):
-            units.append({"unit_id": f"U{len(units) + 1:03d}", "line": line_no, "text": part})
+            unit_type = "table_header" if source_kind == "table_header" else "content"
+            units.append({
+                "unit_id": f"U{len(units) + 1:03d}",
+                "line": line_no,
+                "text": part,
+                "source_kind": source_kind,
+                "unit_type": unit_type,
+                "claim_review_signals": claim_review_signals(part, source_kind),
+            })
 
     if not article_lines:
         raise ValueError(f"No article body found in {path}")
