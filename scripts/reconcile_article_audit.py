@@ -67,12 +67,42 @@ QUANTITY_RE = re.compile(
     re.IGNORECASE,
 )
 CAUSAL_RE = re.compile(
-    r"\b(?:because|therefore|so that|prevents?|helps?|improves?|ensures?|allows?|"
-    r"enables?|leads? to|results? in|causes?|changes?|makes?|keeps?|guides?|matches?|"
+    r"\b(?:because|therefore|so that|prevents?|helps?|improves?|ensures?|allow(?:s|ed|ing)?|"
+    r"enables?|leads? to|results? in|causes?|changes?|make(?:s)?|making|made|keeps?|guides?|matches?|"
     r"supports?|benefits?|more useful|focus on)\b|"
     r"(?:因为|所以|因此|防止|避免|帮助|改善|确保|使得|导致|造成|改变|有利于|支持|指导|匹配)",
     re.IGNORECASE,
 )
+
+
+AVAILABILITY_CONDITION_RE = re.compile(
+    r"\b(?:when|whenever|if|as)\s+(?:the\s+)?(?:time|schedule|availability)\s+"
+    r"(?P<verb>allows?|allowed)(?=\s*(?:$|[.,;:!?]))", re.IGNORECASE,
+)
+MANUFACTURING_ACTION_RE = re.compile(
+    r"\b(?P<verb>makes?|making|made)\s+(?:(?:a|an|the|physical|custom|paper|box)\s+)*"
+    r"(?:prototypes?|samples?)(?=\s*(?:$|[.,;:!?]|\b(?:for|from|using|before|after|and|then)\b))",
+    re.IGNORECASE,
+)
+
+
+def has_causal_effect_signal(text: str) -> bool:
+    """Keep effect signals, excluding only locally unambiguous noncausal verbs.
+
+    Original text still drives predicate, scope and exact-evidence checks.
+    An adjective complement (make samples easier) or a following infinitive
+    (time allows paint to dry) is deliberately not a manufacturing/condition
+    exemption. Other effect words in the same sentence remain visible.
+    """
+    def mask_verb(match: re.Match) -> str:
+        value = match.group(0)
+        start = match.start("verb") - match.start()
+        end = match.end("verb") - match.start()
+        return value[:start] + " " * (end - start) + value[end:]
+
+    text = AVAILABILITY_CONDITION_RE.sub(mask_verb, text)
+    text = MANUFACTURING_ACTION_RE.sub(mask_verb, text)
+    return bool(CAUSAL_RE.search(text))
 
 
 def normalized(value: object) -> str:
@@ -345,7 +375,7 @@ def validate_entailed_review(claim: dict, row: dict, duplicated_reasons: set[str
         required_covered.add("scope_condition")
     if QUANTITY_RE.search(claim_text):
         required_covered.add("quantity_time_version")
-    if CAUSAL_RE.search(claim_text):
+    if has_causal_effect_signal(claim_text):
         required_covered.add("causal_effect")
 
     for key in CHECK_KEYS:
@@ -617,6 +647,13 @@ def exclude_pure_question_claims(
             for unit in prepared.get("article_units", [])
             if isinstance(unit, dict) and unit.get("unit_id")
         }
+        structural_units = {
+            str(unit.get("unit_id"))
+            for unit in prepared.get("article_units", [])
+            if isinstance(unit, dict)
+            and unit.get("unit_id")
+            and unit.get("unit_type") in STRUCTURAL_UNIT_TYPES
+        }
         for payload in (judgments, adversarial):
             coverage = payload.get("coverage_review")
             classifications = coverage.get("unit_classifications") if isinstance(coverage, dict) else None
@@ -627,6 +664,8 @@ def exclude_pure_question_claims(
                 if not isinstance(row, dict):
                     continue
                 unit_id = str(row.get("unit_id", ""))
+                if unit_id in structural_units:
+                    continue
                 if unit_id in remaining_units or not is_pure_question(unit_text.get(unit_id, "")):
                     continue
                 row.update({

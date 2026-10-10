@@ -8,9 +8,9 @@
 
 | 版本对象 | 当前值 | 含义 |
 | --- | --- | --- |
-| Faithfulness 审核规则 | `v1.6.4` | 本 Skill 的主张识别、证据判断、双轮盲审和输出规则 |
-| 知识库管理 Skill | `manage-article-knowledge v0.6` | 负责文章任务、版本、结果导入、Claim 映射和完成状态 |
-| 三方交接合同 | `MAK-HANDOFF-1.3` | 知识库、写作方和本 Skill 之间的请求/回执字段约定 |
+| Faithfulness 审核规则 | `v1.6.8` | 本 Skill 的主张识别、证据判断、双轮盲审和输出规则 |
+| 知识库管理 Skill | `manage-article-knowledge v0.6.1` | 负责文章任务、版本、结果导入、Claim 映射和完成状态 |
+| 三方交接合同 | 运行时读取当前安装合同 | 知识库、写作方和本 Skill 之间的请求/回执字段约定，不以本文示例替代机器合同 |
 | 文章版本 | `v1`、`v2`、`v3`…… | 同一文章的不同正文版本；每个版本有独立审核结果目录 |
 
 文章重做后，知识库必须递增 `article_version`，并在新版本目录重新审核。旧版本结果保留为历史记录，不能被新版本覆盖或当作新版本结论。
@@ -39,7 +39,7 @@
 
 ```text
 handoff_event: faithfulness_request
-handoff_contract_version: MAK-HANDOFF-1.3
+handoff_contract_version: <当前安装合同中声明的版本>
 project_id
 article_id
 article_version
@@ -179,7 +179,7 @@ opening direction and main logo zone
 └── faithfulness_summary.md
 ```
 
-`judgments.json` 要保留每条主张的逐字文章引文、严格语义状态、证据文件、行号、连续原文和简短理由；`coverage_review` 必须覆盖 `prepared` 中每个 `unit_id`。明细 Markdown 和 HTML 用灰色表示非主张/结构内容（包括标题和表格表头），绿色表示明确支持，黄色表示尚未确认，红色只表示明确冲突，并支持独立筛选。人读报告不展示 DeepEval 兼容百分比。
+`judgments.json` 要保留每条主张的逐字文章引文、严格语义状态、证据文件、行号、连续原文和简短理由；`coverage_review` 必须覆盖 `prepared` 中每个 `unit_id`。明细 Markdown 和 HTML 用灰色表示非主张/结构内容（包括标题和表格表头），绿色表示明确支持，黄色表示尚未确认，红色只表示明确冲突，并支持独立筛选。HTML 的“只看明确支持”按最终 Claim 过滤：混合单元只要含有一条明确支持主张仍保留该单元，并隐藏其中非支持卡片；不能因为单元整体是“部分支持”而隐藏支持主张。渲染器还校验汇总支持数与最终 `entailed` Claim 数及逐单元卡片映射一致。人读报告不展示 DeepEval 兼容百分比。
 
 已有当前版本核心结果时拒绝覆盖。新文章版本必须由知识库递增后写入新目录；历史版本结果保留，不删除、不覆盖。
 

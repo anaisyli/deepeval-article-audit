@@ -19,20 +19,18 @@ def candidate_skill_roots(explicit: Path | None = None) -> list[Path]:
     if explicit:
         candidates.append(explicit)
     configured = os.environ.get("MANAGE_ARTICLE_KNOWLEDGE_SKILL", "").strip()
-    if configured:
+    if not explicit and configured:
         candidates.append(Path(configured))
     home = Path.home()
-    candidates.extend(
-        [
-            home / ".agents" / "skills" / "manage-article-knowledge",
-            home / ".codex" / "skills" / "manage-article-knowledge",
-            # In a source checkout, the repository container may itself be
-            # the installed root (GitHub layout) or may contain the versioned
-            # skill directory (maintenance layout). The normalization below
-            # handles both without assuming a drive letter.
-            Path(__file__).resolve().parents[2] / "manage-article-knowledge",
-        ]
-    )
+    if not explicit and not configured:
+        candidates.extend(
+            [
+                home / ".agents" / "skills" / "manage-article-knowledge",
+                home / ".codex" / "skills" / "manage-article-knowledge",
+                # A source checkout can contain a direct or versioned root.
+                Path(__file__).resolve().parents[2] / "manage-article-knowledge",
+            ]
+        )
     # Support both a GitHub skill root and the maintenance repository's
     # versioned child directory. An explicit SKILL.md path is also accepted.
     normalized: list[Path] = []
@@ -41,7 +39,16 @@ def candidate_skill_roots(explicit: Path | None = None) -> list[Path]:
         if candidate.name.lower() == "skill.md":
             candidate = candidate.parent
         normalized.append(candidate)
-        normalized.append(candidate / "manage-article-knowledge-v0.6")
+        if not (candidate / "references" / "handoff-contract.json").is_file() and candidate.is_dir():
+            children = []
+            for child in sorted(candidate.iterdir()):
+                skill_file = child / "SKILL.md"
+                if child.is_dir() and skill_file.is_file() and (child / "references" / "handoff-contract.json").is_file():
+                    if re.search(r"(?m)^name:\s*manage-article-knowledge\s*$", skill_file.read_text(encoding="utf-8-sig")):
+                        children.append(child)
+            if len(children) > 1:
+                raise ManagedHandoffError("ambiguous manage skill roots; specify one skill directory: " + "; ".join(map(str, children)))
+            normalized.extend(children)
 
     unique: list[Path] = []
     seen: set[str] = set()

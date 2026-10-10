@@ -17,9 +17,11 @@ sys.path.insert(0, str(SCRIPTS))
 from manage_handoff_contract import load_contract, locate_contract  # noqa: E402
 from render_article_audit import (  # noqa: E402
     MODE,
+    article_section,
     discover_cases,
     protocol2_handoff_error,
     reconciliation_needs_refresh,
+    validate_render_invariants,
 )
 
 
@@ -106,6 +108,31 @@ def line_number(text: str, exact_line: str) -> int:
 
 
 class AuditPipelineTests(unittest.TestCase):
+    def test_supported_filter_keeps_partially_supported_unit_visible(self) -> None:
+        claim_base = {
+            "unit_id": "U001",
+            "article_line": 1,
+            "article_quote": "A claim.",
+            "claim": "A claim.",
+            "reason": "逐项核对。",
+            "evidence": [],
+        }
+        supported = {**claim_base, "claim_id": "C001", "verdict": "supported", "semantic_status": "entailed"}
+        unknown = {**claim_base, "claim_id": "C002", "verdict": "unsupported", "semantic_status": "unknown"}
+        case = {
+            "prepared": {
+                "article_id": "ART-001",
+                "article_title": "Test",
+                "article_units": [{"unit_id": "U001", "line": 1, "text": "A mixed unit."}],
+                "article_lines": [{"line": 1, "text": "A mixed unit."}],
+            },
+            "judgments": {"penalize_ambiguous_claims": False},
+            "claims": [supported, unknown],
+        }
+        validate_render_invariants(case)
+        rendered = article_section(case, 0)
+        self.assertIn('class="article-line article-unit partially-supported mixed_unknown contains-supported"', rendered)
+
     def test_renderer_refreshes_completed_reconciliation_with_stale_question(self) -> None:
         judgments = {
             "claims": [{"claim_id": "C040", "claim": "What is the warranty period?"}],
@@ -159,6 +186,15 @@ class AuditPipelineTests(unittest.TestCase):
                 locate_contract(nested),
                 (nested_root / "references" / "handoff-contract.json").resolve(),
             )
+            renamed = nested_root.with_name("manage-article-knowledge-v0.6.1")
+            nested_root.rename(renamed)
+            self.assertEqual(locate_contract(nested), (renamed / "references" / "handoff-contract.json").resolve())
+            with self.assertRaisesRegex(ValueError, "not found"):
+                locate_contract(base / "missing-explicit-root")
+            import shutil
+            shutil.copytree(renamed, nested / "another-version")
+            with self.assertRaisesRegex(ValueError, "ambiguous"):
+                locate_contract(nested)
 
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
@@ -575,6 +611,23 @@ class AuditPipelineTests(unittest.TestCase):
         (self.managed / "ART-V05-001-adversarial-review.json").write_text(
             json.dumps(review, ensure_ascii=False, indent=2), encoding="utf-8"
         )
+        # Preserve the discovered artifact stems when persisting reconciliation.
+        for path in self.managed.glob('*.json'):
+            path.rename(path.with_name(path.name.replace('ART-V05-001-', 'audit-case-')))
+        source_paths = list(self.managed.glob("*.json"))
+        original_sources = {path: path.read_bytes() for path in source_paths}
+        for argument, value, error in (("--article-id", "WRONG-ARTICLE", "article_id"),
+                                       ("--article-version", "v999", "article_version")):
+            with self.subTest(argument=argument):
+                rejected = subprocess.run(
+                    [sys.executable, str(SCRIPTS / "render_article_audit.py"),
+                     "--result-dir", str(self.managed), argument, value],
+                    capture_output=True, text=True,
+                )
+                self.assertNotEqual(rejected.returncode, 0)
+                self.assertIn(error, rejected.stderr)
+                self.assertEqual({path: path.read_bytes() for path in source_paths}, original_sources,
+                                 "Rejected identity must not persist reconciliation")
         subprocess.run(
             [
                 sys.executable,
@@ -595,8 +648,9 @@ class AuditPipelineTests(unittest.TestCase):
         self.assertIn("1 | 3 | 2 | 33.33%", summary)
         self.assertIn("| 1 | 1 |", summary)
         self.assertNotIn("DeepEval兼容诊断", summary)
+        self.assertEqual(set(self.managed.glob('*.json')), set(source_paths))
         persisted = json.loads(
-            (self.managed / "ART-V05-001-judgments.json").read_text(encoding="utf-8")
+            (self.managed / "audit-case-judgments.json").read_text(encoding="utf-8")
         )
         self.assertEqual(persisted["reconciliation"]["gate_version"], "1.0")
         self.assertTrue(persisted["reconciliation"]["completed"])
@@ -792,6 +846,27 @@ class AuditPipelineTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "pure question"):
             discover_cases(self.managed)
+
+    def test_structured_question_heading_uses_heading_category(self) -> None:
+        self.article.write_text(
+            ARTICLE_TEXT.replace(
+                "**IP67** certified.",
+                "## Which protection plan fits? <!-- MAK_DOCX_HEADING_STYLE:Heading2 -->\n\n**IP67** certified.",
+            ),
+            encoding="utf-8",
+        )
+        prepared = self.run_prepare_managed()
+        judgments = self.valid_judgments(prepared)
+        heading = next(unit for unit in prepared["article_units"] if unit["text"] == "Which protection plan fits?")
+        (self.managed / "ART-V05-001-judgments.json").write_text(
+            json.dumps(judgments, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        cases = discover_cases(self.managed)
+        row = next(
+            row for row in cases[0]["judgments"]["coverage_review"]["unit_classifications"]
+            if row["unit_id"] == heading["unit_id"]
+        )
+        self.assertEqual(row["category"], "heading")
 
     def test_managed_renderer_rejects_plain_heading_claim_without_override(self) -> None:
         self.article.write_text(

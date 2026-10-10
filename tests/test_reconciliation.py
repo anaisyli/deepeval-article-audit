@@ -80,6 +80,58 @@ def review_row(
 
 
 class ReconciliationTests(unittest.TestCase):
+    def causal_review(self, text: str, *, causal: str = "not_applicable", scope: str = "covered") -> dict:
+        claim = base_claim("C001", text, text)
+        claim["atomicity_note"] = "本例仅测试词法门禁，其他独立命题在真实审核中仍需拆分并分别判断。"
+        row = review_row("C001", text, text)
+        row["entailment_checks"] = {
+            "subject_object": check("covered", text, text),
+            "predicate_relation": check("covered", text, text),
+            "scope_condition": check(scope, text if scope == "covered" else "", text if scope == "covered" else ""),
+            "quantity_time_version": check("covered", text, text),
+            "causal_effect": check(causal, text if causal == "covered" else "", text if causal == "covered" else ""),
+        }
+        judgments, review = self.payloads(claim, row)
+        reconcile_payloads(judgments, review)
+        return judgments["claims"][0]
+
+    def test_availability_and_manufacturing_are_not_causal_effects(self) -> None:
+        for text in (
+            "Physical samples may be sent when time allows.",
+            "WHEN THE SCHEDULE ALLOWS, physical samples may be sent.",
+            "Physical samples were sent if time allowed.",
+            "The third step is to make prototypes for approval.",
+            "The team makes physical samples before production.",
+            "The team is making a prototype from paper.",
+            "The team made prototypes for approval.",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(self.causal_review(text)["semantic_status"], "entailed")
+
+    def test_real_effects_still_require_causal_evidence(self) -> None:
+        for text in (
+            "The layout allows customers to see the label.",
+            "Time allows paint to dry.",
+            "When time allows paint to dry, inspect the sample.",
+            "The team makes prototypes easier to inspect.",
+            "The team made prototypes easier to inspect.",
+            "The design is making samples easier to inspect.",
+            "The layout allowed customers to see the label.",
+            "The process makes samples more useful.",
+            "When time allows, the layout helps customers see the label.",
+            "Make prototypes for approval because this prevents errors.",
+            "Make prototypes for approval so that customers can inspect them.",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(self.causal_review(text)["semantic_status"], "unknown")
+                self.assertEqual(self.causal_review(text, causal="covered")["semantic_status"], "entailed")
+
+    def test_noncausal_exemption_does_not_skip_condition_evidence(self) -> None:
+        self.assertEqual(
+            self.causal_review("Physical samples may be sent when time allows.", scope="not_applicable")["semantic_status"],
+            "unknown",
+        )
+
     def payloads(self, claim: dict, row: dict) -> tuple[dict, dict]:
         return (
             {
@@ -524,6 +576,40 @@ class ReconciliationTests(unittest.TestCase):
 
         self.assertEqual(len(judgments["claims"]), 1)
         self.assertEqual(judgments["claims"][0]["claim"], answer)
+
+    def test_structured_question_heading_keeps_structural_category(self) -> None:
+        question = "Should every cosmetic SKU use the same box size?"
+        claim = base_claim("C001", question, question)
+        row = review_row("C001", question, question)
+        judgments, review = self.payloads(claim, row)
+        classifications = [{
+            "unit_id": "U001",
+            "classification": "non_factual",
+            "category": "heading",
+            "reason": "结构化FAQ问题标题不进入事实主张分母。",
+        }]
+        judgments["coverage_review"] = {
+            "reviewed_unit_count": 1,
+            "factual_unit_count": 0,
+            "non_factual_unit_count": 1,
+            "unit_classifications": copy.deepcopy(classifications),
+        }
+        review["coverage_review"] = copy.deepcopy(judgments["coverage_review"])
+        prepared = {"article_units": [{
+            "unit_id": "U001",
+            "line": 1,
+            "text": question,
+            "unit_type": "heading",
+            "source_kind": "heading",
+            "claim_review_signals": [],
+        }]}
+
+        reconcile_payloads(judgments, review, prepared)
+
+        for payload in (judgments, review):
+            row = payload["coverage_review"]["unit_classifications"][0]
+            self.assertEqual(row["classification"], "non_factual")
+            self.assertEqual(row["category"], "heading")
 
     def test_faq_answer_inventory_is_kept_while_question_is_excluded(self) -> None:
         claim_text = "The product is IP67 certified."

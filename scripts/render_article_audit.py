@@ -7,6 +7,8 @@ import hashlib
 import html
 import json
 import re
+import shutil
+import tempfile
 from pathlib import Path
 
 from audit_common import (
@@ -636,9 +638,21 @@ def validate_case(
                         f"{judgment_path.name}: non_factual {unit_id} is justified by missing evidence; "
                         "factuality must be decided independently of support"
                     )
-                if is_question(units[unit_id]["text"]) and category != "question":
+                # A DOCX/Markdown structural heading remains a heading even
+                # when its wording ends in a question mark (common for FAQ
+                # prompts). Structural metadata is authoritative; the
+                # question category is reserved for unstructured content.
+                if (
+                    structural_type not in STRUCTURAL_UNIT_TYPES
+                    and is_question(units[unit_id]["text"])
+                    and category != "question"
+                ):
                     raise ValueError(f"{judgment_path.name}: question unit {unit_id} must use category 'question'")
-                if category == "question" and not is_question(units[unit_id]["text"]):
+                if (
+                    structural_type not in STRUCTURAL_UNIT_TYPES
+                    and category == "question"
+                    and not is_question(units[unit_id]["text"])
+                ):
                     raise ValueError(f"{judgment_path.name}: non-question unit {unit_id} cannot use category 'question'")
                 if looks_like_plain_heading(units[unit_id], article_source_lines) and category != "heading":
                     raise ValueError(
@@ -924,6 +938,40 @@ def content_summary(case: dict) -> dict:
     }
 
 
+def validate_render_invariants(case: dict) -> None:
+    """Fail closed when report totals cannot be reproduced by rendered cards."""
+    claims = case["claims"]
+    semantic_statuses = [claim.get("semantic_status") for claim in claims]
+    if any(status is not None for status in semantic_statuses):
+        entailed = sum(status == "entailed" for status in semantic_statuses)
+        supported = sum(claim.get("verdict") == "supported" for claim in claims)
+        if supported != entailed:
+            raise ValueError(
+                "Renderer invariant failed: supported numerator does not equal "
+                "the final entailed claim count"
+            )
+
+    prepared_unit_ids = {
+        str(item.get("unit_id", "")) for item in case["prepared"].get("article_units", [])
+    }
+    content = content_summary(case)
+    rendered_claims = [claim for row in content["rows"] for claim in row["claims"]]
+    if len(rendered_claims) != len(claims):
+        raise ValueError(
+            "Renderer invariant failed: not every final claim is attached to a rendered unit"
+        )
+    claim_ids = [str(claim.get("claim_id", "")) for claim in claims]
+    rendered_ids = [str(claim.get("claim_id", "")) for claim in rendered_claims]
+    if (
+        len(set(claim_ids)) != len(claim_ids)
+        or sorted(claim_ids) != sorted(rendered_ids)
+        or any(str(claim.get("unit_id", "")) not in prepared_unit_ids for claim in claims)
+    ):
+        raise ValueError(
+            "Renderer invariant failed: final claims do not map one-to-one to prepared units"
+        )
+
+
 def write_detail(case: dict, output_dir: Path) -> Path:
     prepared, claims = case["prepared"], case["claims"]
     supported = sum(claim["verdict"] == "supported" for claim in claims)
@@ -1170,8 +1218,20 @@ def article_section(case: dict, index: int) -> str:
         "structural": "结构内容 · 不计入",
         }
         cards = "".join(claim_card(claim) for claim in unit_claims)
+        # A supported claim can share its source unit with unknown claims.
+        # Keep that mixed unit visible when the user filters to supported claims;
+        # the claim-level selector below hides the non-supported cards inside it.
+        support_filter_class = (
+            "contains-supported"
+            if any(claim.get("semantic_status") == "entailed" for claim in unit_claims)
+            else ""
+        )
+        class_name = " ".join(
+            token for token in ("article-line", "article-unit", verdict_class, content_row["semantic_summary"], support_filter_class)
+            if token
+        )
         body.append(
-        f'<section class="article-line article-unit {verdict_class} {content_row["semantic_summary"]}" data-kind="{content_row["kind"]}" data-status="{content_row["status"]}" data-semantic-summary="{content_row["semantic_summary"]}" data-unit-id="{html.escape(item["unit_id"])}">'
+        f'<section class="{class_name}" data-kind="{content_row["kind"]}" data-status="{content_row["status"]}" data-semantic-summary="{content_row["semantic_summary"]}" data-unit-id="{html.escape(item["unit_id"])}">'
             f'<div class="line-no">L{item["line"]} · {html.escape(item["unit_id"])}</div>'
             f'<div class="unit-meta"><span class="unit-status {verdict_class}">{semantic_status_labels.get(content_row["semantic_summary"], status_labels[content_row["status"]])}</span>'
             f'<span class="unit-count">{len(unit_claims)} 条原子主张</span></div>'
@@ -1237,7 +1297,7 @@ def write_html(cases: list[dict], output_dir: Path) -> Path:
  .claim summary{{cursor:pointer;padding:10px 12px;background:#f9fafb;display:flex;gap:9px;align-items:flex-start;flex-wrap:wrap}}.claim.entailed summary{{background:var(--green-bg)}}.claim.unknown summary,.claim.legacy.unsupported summary{{background:var(--amber-bg)}}.claim.contradicted summary{{background:var(--red-bg)}}
  .badge{{border-radius:999px;padding:1px 8px;font-size:12px;font-weight:700;white-space:nowrap}}.claim.entailed .badge{{background:var(--green);color:white}}.claim.unknown .badge,.claim.legacy.unsupported .badge{{background:var(--amber);color:white}}.claim.contradicted .badge{{background:var(--red);color:white}}.claim-id{{font:12px ui-monospace,monospace;color:var(--muted);padding-top:2px}}
 .claim-body{{padding:13px 15px;display:grid;grid-template-columns:1fr 1fr;gap:14px}}.claim-body>div:last-child{{grid-column:1/-1}}.claim-body p{{margin:3px 0}}blockquote{{margin:6px 0;padding:10px 13px;border-left:3px solid var(--blue);background:#f6f8fc}}.source{{color:var(--muted);font-size:12px;overflow-wrap:anywhere}}.empty{{color:var(--red);padding:8px 0}}.claim.unknown .empty{{color:var(--amber)}}
-body[data-filter="supported"] .article-line:not(.fully-supported),body[data-filter="factual"] .article-line:not([data-kind="factual"]),body[data-filter="nonfactual"] .article-line[data-kind="factual"]{{display:none}}
+body[data-filter="supported"] .article-line:not(.contains-supported),body[data-filter="factual"] .article-line:not([data-kind="factual"]),body[data-filter="nonfactual"] .article-line[data-kind="factual"]{{display:none}}
  body[data-filter="supported"] .claim:not([data-semantic-status="entailed"]){{display:none}}
  body[data-filter="unknown"] .article-line:not(:has(.claim[data-semantic-status="unknown"])),body[data-filter="unknown"] .claim:not([data-semantic-status="unknown"]){{display:none}}
  body[data-filter="contradicted"] .article-line:not(:has(.claim[data-semantic-status="contradicted"])),body[data-filter="contradicted"] .claim:not([data-semantic-status="contradicted"]){{display:none}}
@@ -1265,6 +1325,7 @@ def discover_cases(
     require_protocol2_adversarial: bool = False,
 ) -> list[dict]:
     cases = []
+    pending_reconciliation = []
     for judgment_path in sorted(input_dir.glob("*-judgments.json")):
         stem = judgment_path.name[: -len("-judgments.json")]
         prepared_path = input_dir / f"{stem}-prepared.json"
@@ -1309,9 +1370,7 @@ def discover_cases(
                 # repaired because it cannot pass the current structural
                 # claim gate and would otherwise fail repeatedly at render.
                 reconcile_payloads(judgments, adversarial_review, prepared)
-                if persist_reconciliation:
-                    atomic_write_json(judgment_path, judgments)
-                    atomic_write_json(review_path, adversarial_review)
+                pending_reconciliation.append((judgment_path, judgments, review_path, adversarial_review))
             if require_protocol2_adversarial:
                 handoff_error = protocol2_handoff_error(judgments, adversarial_review)
                 if handoff_error:
@@ -1325,14 +1384,23 @@ def discover_cases(
             article_override,
             knowledge_override,
         )
-        cases.append({
+        case = {
             "prepared": prepared,
             "judgments": judgments,
             "claims": claims,
             "adversarial_review": adversarial_review,
-        })
+            "reconciliation_updated": any(item[0] == judgment_path for item in pending_reconciliation),
+            "judgment_path": judgment_path,
+            "review_path": review_path,
+        }
+        validate_render_invariants(case)
+        cases.append(case)
     if not cases:
         raise ValueError(f"No *-judgments.json files found in {input_dir}")
+    if persist_reconciliation:
+        for judgment_path, judgments, review_path, review in pending_reconciliation:
+            atomic_write_json(judgment_path, judgments)
+            atomic_write_json(review_path, review)
     return cases
 
 
@@ -1382,7 +1450,7 @@ def main() -> None:
         input_dir,
         args.article,
         args.knowledge,
-        persist_reconciliation=managed and output_dir == input_dir,
+        persist_reconciliation=False,
         require_protocol2_adversarial=managed,
     )
     if managed:
@@ -1427,9 +1495,30 @@ def main() -> None:
             raise SystemExit(str(exc)) from exc
 
     output_dir.mkdir(parents=True, exist_ok=True)
-    outputs = [str(write_detail(case, output_dir).resolve()) for case in cases]
-    outputs.append(str(write_summary(cases, output_dir).resolve()))
-    outputs.append(str(write_html(cases, output_dir).resolve()))
+    # Render all reports into a sibling staging directory. A failed write must
+    # not leave a partial managed result that blocks the next run.
+    staging_dir = Path(tempfile.mkdtemp(prefix=".audit-staging-", dir=str(output_dir.parent)))
+    try:
+        staged_outputs = [write_detail(case, staging_dir) for case in cases]
+        staged_outputs.append(write_summary(cases, staging_dir))
+        staged_outputs.append(write_html(cases, staging_dir))
+        # Identity, contract, source and report validations have all passed.
+        # An invalid managed invocation must never change source artifacts.
+        if managed and output_dir == input_dir:
+            for case in cases:
+                if case["reconciliation_updated"]:
+                    atomic_write_json(case["judgment_path"], case["judgments"])
+                    atomic_write_json(case["review_path"], case["adversarial_review"])
+        outputs: list[str] = []
+        for staged in staged_outputs:
+            destination = output_dir / staged.name
+            staged.replace(destination)
+            outputs.append(str(destination.resolve()))
+    except Exception:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
+    else:
+        shutil.rmtree(staging_dir, ignore_errors=True)
     payload = {"articles": len(cases), "outputs": outputs}
     if managed:
         prepared = cases[0]["prepared"]
