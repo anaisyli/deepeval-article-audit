@@ -1,9 +1,0 @@
-# Runtime and audit output must live outside the skill package.
-/audit-runs/
-/**/__pycache__/
-/.pytest_cache/
-*.py[cod]
-
-# One-off audit work files created at the skill root.
-/tmp_*
-/_generate_*
