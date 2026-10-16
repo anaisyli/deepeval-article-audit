@@ -19,7 +19,7 @@ from audit_common import STRUCTURAL_UNIT_TYPES
 
 
 GATE_VERSION = "1.0"
-COVERAGE_GATE_VERSION = "1.0"
+COVERAGE_GATE_VERSION = "1.1"
 FORCED_REVIEW_SIGNALS = {
     "table_data_row",
     "effect_or_causal_relation",
@@ -85,9 +85,25 @@ MANUFACTURING_ACTION_RE = re.compile(
     re.IGNORECASE,
 )
 
+# A source title and a noun naming a benefit/category are not causal predicates.
+# Keep this local: a verb elsewhere in the same claim must still be checked.
+GUIDANCE_TITLE_RE = re.compile(r"\bGreen\s+Guides\b", re.IGNORECASE)
+BENEFIT_NOUN_RE = re.compile(
+    r"\b(?:the|a|an|any|these|those|specific|general|environmental|potential|claimed|"
+    r"economic|social|financial)\s+(?P<term>benefits?)\b|"
+    r"\b(?P<category>benefits?)(?=\s+(?:claims?|statements?|qualifications?|categories)\b)",
+    re.IGNORECASE,
+)
+BENEFIT_RELATION_RE = re.compile(
+    r"\b(?:provides?|delivers?|offers?|brings?|creates?|produces?|generates?|yields?|"
+    r"gives?|has|have|achieves?)\s+(?:[A-Za-z-]+\s+){0,3}benefits?\b"
+    r"(?!\s+(?:claims?|statements?|qualifications?|categories)\b)",
+    re.IGNORECASE,
+)
+
 
 def has_causal_effect_signal(text: str) -> bool:
-    """Keep effect signals, excluding only locally unambiguous noncausal verbs.
+    """Keep effect signals, excluding locally unambiguous noncausal contexts.
 
     Original text still drives predicate, scope and exact-evidence checks.
     An adjective complement (make samples easier) or a following infinitive
@@ -102,6 +118,17 @@ def has_causal_effect_signal(text: str) -> bool:
 
     text = AVAILABILITY_CONDITION_RE.sub(mask_verb, text)
     text = MANUFACTURING_ACTION_RE.sub(mask_verb, text)
+    text = GUIDANCE_TITLE_RE.sub(lambda match: " " * len(match.group(0)), text)
+    if BENEFIT_RELATION_RE.search(text):
+        return True  # "provides environmental benefits" still asserts an effect.
+    def mask_benefit_noun(match: re.Match) -> str:
+        group = "term" if match.group("term") is not None else "category"
+        start = match.start(group) - match.start()
+        end = match.end(group) - match.start()
+        value = match.group(0)
+        return value[:start] + " " * (end - start) + value[end:]
+
+    text = BENEFIT_NOUN_RE.sub(mask_benefit_noun, text)
     return bool(CAUSAL_RE.search(text))
 
 
@@ -463,6 +490,18 @@ def unknown_review_row(claim: dict, *, reason: str) -> dict:
     return row
 
 
+def nonclaim_frame(text: str) -> bool:
+    """Recognize a narrow discourse frame, never a factual method or effect."""
+    text = " ".join(text.strip().split())
+    if has_causal_effect_signal(text) or re.search(r"\d", text):
+        return False
+    return bool(any(re.fullmatch(pattern, text, re.I) for pattern in (
+        r"The following (?:concepts|ideas|options) are starting points for discussion(?:, with questions to resolve before adoption)?[.]?",
+        r"(?:Environmental|Sustainability) language needs the same care as the material choice[.]?",
+        r"Before (?:expanding|extending) the (?:collection|range), consider agreeing on:",
+    )))
+
+
 def permitted_nonclaim_unit(
     unit: dict,
     first_classification: dict | None,
@@ -485,9 +524,16 @@ def permitted_nonclaim_unit(
     return bool(
         isinstance(first_classification, dict)
         and first_classification.get("classification") == "non_factual"
-        and first_classification.get("category") in PERMITTED_NONCLAIM_CATEGORIES
+        and (first_classification.get("category") in PERMITTED_NONCLAIM_CATEGORIES
+             or (first_classification.get("category") == "pure_recommendation"
+                 and nonclaim_frame(str(unit.get("text", "")))))
         and (second_is_non_factual if require_second_pass else not second_says_factual)
-        and not signals
+        and (not signals or (
+            first_classification.get("category") in {"transition", "pure_recommendation"}
+            and isinstance(second_classification, dict)
+            and second_classification.get("category") in {"transition", "pure_recommendation"}
+            and nonclaim_frame(str(unit.get("text", "")))
+        ))
     )
 
 
@@ -737,7 +783,7 @@ def apply_coverage_fallback(judgments: dict, adversarial: dict, prepared: dict |
         )
         missing_second_pass = not isinstance(second_classification, dict)
         permitted_nonclaim = permitted_nonclaim_unit(
-            unit, classification, second_classification, require_second_pass=False
+            unit, classification, second_classification, require_second_pass=True
         )
         needs_fallback = first_excluded and (
             bool(signals) or second_says_factual or missing_second_pass or not two_pass_exclusion
@@ -889,6 +935,14 @@ def reconcile_payloads(judgments: dict, adversarial: dict, prepared: dict | None
     coverage_fallback_unit_ids, coverage_warning_unit_ids = apply_coverage_fallback(
         judgments, adversarial, prepared
     )
+    # The safety net must not reintroduce question-shaped propositions.
+    final_questions, final_inventory = exclude_pure_question_claims(judgments, adversarial, prepared)
+    pure_question_claim_ids_excluded = list(dict.fromkeys(pure_question_claim_ids_excluded + final_questions))
+    pure_question_inventory_ids_excluded = list(dict.fromkeys(pure_question_inventory_ids_excluded + final_inventory))
+    structurally_excluded_claim_ids += enforce_structural_exclusions(judgments, adversarial, prepared)
+    surviving_units = {str(c.get("unit_id")) for c in judgments.get("claims", [])}
+    coverage_fallback_unit_ids = [u for u in coverage_fallback_unit_ids if u in surviving_units]
+    coverage_warning_unit_ids = [u for u in coverage_warning_unit_ids if u in surviving_units]
     renumber_claims(judgments, adversarial, prepared)
     claims = judgments.get("claims")
     rows = adversarial.get("claim_reviews")

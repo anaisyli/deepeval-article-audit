@@ -1088,6 +1088,26 @@ class AuditPipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exact substring"):
             discover_cases(self.work)
 
+
+    def test_subject_metadata_is_excluded_from_evidence_chunks(self) -> None:
+        from audit_common import extract_knowledge_chunks, source_scope
+        with tempfile.TemporaryDirectory() as temp:
+            package = Path(temp) / "30_本篇知识库资料.md"
+            lines = ["- 资料视图：写作素材包", "## 一、可直接用于正文的事实",
+                     "### 证据正文（供Faithfulness核验）", "> We offer paper boxes.",
+                     "- 主体归属说明：We refers to JERL.",
+                     "- 来源链接：https://example.com", "## 四、按大纲使用建议"]
+            package.write_text("\n".join(lines), encoding="utf-8")
+            scope = source_scope(lines, package)
+            self.assertTrue(scope[3])
+            self.assertFalse(scope[4])
+            self.assertFalse(scope[5])
+            chunks = extract_knowledge_chunks(package)
+            self.assertEqual(len(chunks), 1)
+            self.assertNotIn("JERL", chunks[0]["text"])
+            self.assertEqual(chunks[0]["line_start"], 4)
+            self.assertEqual(chunks[0]["line_end"], 4)
+
     def test_legacy_body_heading_excludes_managed_metadata(self) -> None:
         legacy = ARTICLE_TEXT.replace("- 模板版本：v0.6-20260907.1\n", "")
         legacy = legacy.replace("<!-- ARTICLE_BODY_START -->\n", "").replace("<!-- ARTICLE_BODY_END -->\n", "")
@@ -1199,8 +1219,6 @@ class AuditPipelineTests(unittest.TestCase):
                 str(source_root),
                 "--website",
                 "https://example.com/",
-                "--content-owner",
-                "测试负责人",
             ],
             check=True,
             capture_output=True,

@@ -331,7 +331,11 @@ def source_scope(lines: list[str], path: Path) -> list[bool]:
                     evidence_level = level
                     found_evidence = True
                 continue
-            if evidence_level is not None:
+            if evidence_level is not None and not re.match(
+                r"^\s*[-*]\s*(?:主体归属说明|来源(?:链接|类型|与精确位置)?|原始来源|精确位置|"
+                r"source(?:\s+url|\s+type|\s+and\s+location)?|location)\s*[：:]?",
+                line, re.IGNORECASE,
+            ):
                 selected[index] = True
         if not found_evidence:
             raise ValueError(

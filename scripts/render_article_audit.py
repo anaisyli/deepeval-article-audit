@@ -32,6 +32,7 @@ from reconcile_article_audit import (
     is_pure_question,
     reconcile_payloads,
 )
+from evidence_identity import contexts_for_files, validate_coreference
 
 
 MODE = "DeepEval Faithfulness 规则复现（Codex 评审，非 DeepEval 官方运行）"
@@ -397,6 +398,10 @@ def validate_case(
         normalized_path(old): current
         for old, current in zip(original_source_paths, knowledge_paths)
     }
+    # EC-1 identity blocks are loaded from the same current knowledge files as
+    # ordinary evidence. They can explain a source pronoun, but never enter
+    # the ordinary evidence list or replace a factual quote.
+    identity_contexts = contexts_for_files(knowledge_paths)
     article_source_lines = read_source_lines(article_path)
     seen: set[str] = set()
     claims = judgments.get("claims")
@@ -550,6 +555,20 @@ def validate_case(
                     raise ValueError(
                         f"{judgment_path.name}: supported {claim_id} cites metadata or a non-support section"
                     )
+        # Resolve moved task paths for identity references just as for ordinary
+        # evidence; all quotes and line spans still validate against current 30.
+        for ref in claim.get("coreference_evidence", []) if isinstance(claim.get("coreference_evidence", []), list) else []:
+            if not isinstance(ref, dict):
+                continue
+            raw = ref.get("source_file", "")
+            if raw:
+                aliased = source_aliases.get(normalized_path(Path(str(raw)).resolve()))
+                if aliased:
+                    ref["source_file"] = str(aliased)
+        try:
+            validate_coreference(claim, identity_contexts)
+        except ValueError as exc:
+            raise ValueError(f"{judgment_path.name}: {claim_id}: {exc}") from exc
     if prepared.get("integration_mode") == "manage-article-knowledge-v0.6":
         warning = validate_reason_diversity(claims, "reason", f"{judgment_path.name} verdicts")
         if warning:

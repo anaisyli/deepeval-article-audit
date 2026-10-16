@@ -24,6 +24,7 @@ from audit_common import (
     public_chunk,
     read_text,
 )
+from evidence_identity import contexts_for_files
 from manage_handoff_contract import ManagedHandoffError, load_contract, validate_event
 
 
@@ -251,6 +252,7 @@ def main() -> None:
         "article_lines": article["article_lines"],
         "article_units": article["article_units"],
         "knowledge_chunks": [public_chunk(chunk) for chunk in chunks],
+        "identity_contexts": contexts_for_files(args.knowledge),
         "rules": {
             "headings_excluded": True,
             "structured_headings_preserved": True,

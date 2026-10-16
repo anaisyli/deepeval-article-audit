@@ -132,6 +132,35 @@ class ReconciliationTests(unittest.TestCase):
             "unknown",
         )
 
+    def test_guidance_titles_and_benefit_nouns_do_not_assert_effects(self) -> None:
+        for text in (
+            'Under the U.S. Federal Trade Commission Green Guides, broad, unqualified environmental benefit claims such as “green” or “eco-friendly” should be avoided.',
+            'General claims need clear, prominent qualifications identifying specific benefits.',
+            'The FTC Green Guides treat recyclable claims as dependent on access to recycling facilities.',
+            'The guidance defines environmental benefit claims.',
+            'The report lists potential benefits.',
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(self.causal_review(text)['semantic_status'], 'entailed')
+
+    def test_title_or_benefit_noun_does_not_mask_real_effects(self) -> None:
+        for text in (
+            'The Green Guides help marketers avoid misleading claims.',
+            'The Green Guides guide marketers through environmental claims.',
+            'The packaging benefits customers.',
+            'The process provides environmental benefits.',
+            'This design offers specific benefits.',
+            'Environmental benefit claims improve customer trust.',
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(self.causal_review(text)['semantic_status'], 'unknown')
+                self.assertEqual(self.causal_review(text, causal='covered')['semantic_status'], 'entailed')
+
+    def test_noncausal_title_does_not_exempt_missing_scope(self) -> None:
+        self.assertEqual(self.causal_review(
+            'Under the FTC Green Guides, recyclable claims depend on access to facilities.',
+            scope='not_applicable')['semantic_status'], 'unknown')
+
     def payloads(self, claim: dict, row: dict) -> tuple[dict, dict]:
         return (
             {
@@ -148,6 +177,46 @@ class ReconciliationTests(unittest.TestCase):
                 "claim_reviews": [row],
             },
         )
+
+
+    def test_ambiguous_subject_and_partial_relation_downgrade_to_unknown(self) -> None:
+        for dimension in ("subject_object", "predicate_relation", "causal_effect"):
+            with self.subTest(dimension=dimension):
+                text = "JERL offers paper boxes that reduce waste."
+                evidence = "We offer paper boxes that reduce waste."
+                claim = base_claim("C001", text, evidence)
+                claim["atomicity_note"] = "本夹具专门验证缺失语义维度的降级，真实复合谓词仍应拆分审核。"
+                row = review_row("C001", text, evidence)
+                row["entailment_checks"] = {
+                    "subject_object": check("covered", "JERL", "We"),
+                    "predicate_relation": check("covered", "offers", "offer"),
+                    "scope_condition": check("not_applicable"),
+                    "quantity_time_version": check("not_applicable"),
+                    "causal_effect": check("covered", "reduce waste", "reduce waste"),
+                }
+                row["entailment_checks"][dimension] = check("missing", text, "")
+                row["challenge_reason"] = "当前证据的主体归属或断言关系并未唯一覆盖，不能用相关材料列表补足缺项。"
+                judgments, review = self.payloads(claim, row)
+                reconcile_payloads(judgments, review)
+                self.assertEqual(judgments["claims"][0]["semantic_status"], "unknown")
+                self.assertEqual(judgments["claims"][0]["verdict"], "unsupported")
+
+    def test_supported_paraphrase_with_explicit_subject_survives(self) -> None:
+        text = "JERL supplies paper boxes."
+        evidence = "JERL offers paper boxes."
+        claim = base_claim("C001", text, evidence)
+        row = review_row("C001", text, evidence)
+        row["entailment_checks"] = {
+            "subject_object": check("covered", "JERL", "JERL"),
+            "predicate_relation": check("covered", "supplies paper boxes", "offers paper boxes"),
+            "scope_condition": check("not_applicable"),
+            "quantity_time_version": check("not_applicable"),
+            "causal_effect": check("not_applicable"),
+        }
+        row["challenge_reason"] = "证据明确指出JERL及同一纸盒供应关系，supplies只是offers的忠实同义表达。"
+        judgments, review = self.payloads(claim, row)
+        reconcile_payloads(judgments, review)
+        self.assertEqual(judgments["claims"][0]["semantic_status"], "entailed")
 
     def test_direct_entailment_survives_two_pass_gate(self) -> None:
         claim_text = "The product is IP67 certified."
